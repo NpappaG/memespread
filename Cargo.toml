@@ -9,6 +9,8 @@ edition = "2021"
 anyhow = "1.0.93"
 dotenv = "0.15.0"
 dotenv_codegen = "0.15.0"
+reqwest = { version = "0.11", features = ["json"] }
+serde_json = "1.0.133"
 solana-account-decoder = "1.17"
 solana-client = "1.17"
 solana-sdk = "1.17"
