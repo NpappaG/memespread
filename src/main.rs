@@ -17,6 +17,21 @@ use reqwest;
 use serde_json::Value;
 use rayon::prelude::*;
 use std::collections::HashSet;
+use axum::{
+    routing::get,
+    Router,
+    extract::Query,
+    Json,
+    extract::State,
+    http::{Method, StatusCode, HeaderValue},
+    debug_handler,
+};
+use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
+use std::net::SocketAddr;
+use serde_json::json;
+use std::sync::Arc;
+use tokio::net::TcpListener;
 
 async fn get_token_price(mint_address: &str) -> Result<f64, Box<dyn std::error::Error>> {
     let url = format!("https://api.jup.ag/price/v2?ids={}", mint_address);
@@ -36,10 +51,10 @@ async fn get_token_price(mint_address: &str) -> Result<f64, Box<dyn std::error::
 }
 
 async fn get_token_holders(
-    client: &RpcClient,
+    client: &Arc<RpcClient>,
     mint_address: &str,
     price_in_usd: f64,
-) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(String, u64)>, anyhow::Error> {
     let mint_pubkey = Pubkey::from_str(mint_address)?;
     let mint_account = client.get_account(&mint_pubkey).await?;
     let mint_data = spl_token::state::Mint::unpack(&mint_account.data)?;
@@ -224,6 +239,139 @@ async fn get_token_holders(
     Ok(final_holders)
 }
 
+#[derive(Deserialize)]
+struct TokenQuery {
+    mint_address: String,
+}
+
+#[derive(Serialize)]
+struct TokenHolderStats {
+    price: f64,
+    supply: f64,
+    market_cap: f64,
+    decimals: u8,
+    holder_thresholds: Vec<HolderThreshold>,
+    concentration_metrics: Vec<ConcentrationMetric>,
+}
+
+#[derive(Serialize)]
+struct HolderThreshold {
+    usd_threshold: f64,
+    count: usize,
+    percentage: f64,
+}
+
+#[derive(Serialize)]
+struct ConcentrationMetric {
+    top_n: usize,
+    percentage: f64,
+}
+
+#[debug_handler]
+async fn token_stats(
+    Query(params): Query<TokenQuery>,
+    State(rpc_client): State<Arc<RpcClient>>,
+) -> Result<Json<TokenHolderStats>, (StatusCode, Json<serde_json::Value>)> {
+    let price_in_usd = match get_token_price(&params.mint_address).await {
+        Ok(price) => price,
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "error": format!("Failed to fetch price: {}", e)
+            }))));
+        }
+    };
+
+    let holders = get_token_holders(&rpc_client, &params.mint_address, price_in_usd)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": format!("Failed to fetch holders: {}", e)
+            })))
+        })?;
+
+    let mint_pubkey = Pubkey::from_str(&params.mint_address)
+        .map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(json!({
+                "error": format!("Invalid mint address: {}", e)
+            })))
+        })?;
+
+    let mint_account = rpc_client.get_account(&mint_pubkey)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": format!("Failed to fetch mint account: {}", e)
+            })))
+        })?;
+
+    let mint_data = spl_token::state::Mint::unpack(&mint_account.data)
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": format!("Failed to unpack mint data: {}", e)
+            })))
+        })?;
+
+    let decimals = mint_data.decimals;
+    let supply = mint_data.supply as f64 / 10f64.powi(decimals as i32);
+    let market_cap = supply * price_in_usd;
+
+    // Calculate holder thresholds
+    let thresholds = vec![10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0];
+    let min_tokens_for_threshold: Vec<f64> = thresholds.iter()
+        .map(|usd| usd / price_in_usd)
+        .collect();
+
+    let mut threshold_counts = vec![0; thresholds.len()];
+    for (_, amount) in &holders {
+        let token_amount = (*amount as f64) / (10f64.powi(decimals as i32));
+        for (i, threshold) in min_tokens_for_threshold.iter().enumerate() {
+            if token_amount >= *threshold {
+                threshold_counts[i] += 1;
+            }
+        }
+    }
+
+    let holder_thresholds: Vec<HolderThreshold> = thresholds.iter()
+        .zip(&threshold_counts)
+        .map(|(usd, count)| HolderThreshold {
+            usd_threshold: *usd,
+            count: *count,
+            percentage: if threshold_counts[0] > 0 {
+                (*count as f64 / threshold_counts[0] as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    // Calculate concentration metrics
+    let concentration_points = vec![1, 10, 25, 50, 100, 250];
+    let concentration_metrics: Vec<ConcentrationMetric> = concentration_points.iter()
+        .filter_map(|&n| {
+            if n <= holders.len() {
+                let sum: u64 = holders.iter().take(n).map(|(_, amount)| amount).sum();
+                let percentage = (sum as f64 / mint_data.supply as f64) * 100.0;
+                Some(ConcentrationMetric {
+                    top_n: n,
+                    percentage,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let stats = TokenHolderStats {
+        price: price_in_usd,
+        supply,
+        market_cap,
+        decimals,
+        holder_thresholds,
+        concentration_metrics,
+    };
+    Ok(Json(stats))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -231,14 +379,22 @@ async fn main() -> Result<()> {
     dotenv().ok();
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set");
     let rpc_url = format!("https://rpc.helius.xyz/?api-key={}", api_key);
-    let rpc_client = RpcClient::new(rpc_url);
-    let mint_address = "8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn";
-    
-    let price_in_usd = get_token_price(mint_address).await.expect("Failed to fetch token price");
+    let rpc_client = Arc::new(RpcClient::new(rpc_url));
 
-    get_token_holders(&rpc_client, &mint_address, price_in_usd)
-        .await
-        .expect("Failed to fetch token holders");
+    let cors = CorsLayer::new()
+        .allow_origin("*".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET]);
+
+    let app = Router::new()
+        .route("/token-stats", get(token_stats))
+        .layer(cors)
+        .with_state(rpc_client);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    tracing::info!("Listening on {}", addr);
+    
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
