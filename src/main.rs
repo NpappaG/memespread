@@ -73,25 +73,43 @@ async fn get_token_holders(
     ).await?;
 
     let mut token_holders = Vec::new();
-    let excluded_owners = vec![
-        // Raydium LP
-        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", // Raydium LP
-        "7aV4BodfLwhrwyqsLXCoMmxXzCzdEPpz3QMv46XjQsFb", // Meteora
+    let program_ids = vec![
+        "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium concentrated
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
     ];
-    
+
+    let excluded_owners = vec![
+        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", //Raydium LP
+    ];
+
     for (pubkey, account) in accounts {
         if let Ok(token_account) = TokenAccount::unpack(&account.data) {
-            // Skip if owned by any excluded address
-            if excluded_owners.contains(&token_account.owner.to_string().as_str()) {
-                tracing::info!("Excluded {} holding {} tokens", 
-                    token_account.owner.to_string(),
-                    token_account.amount as f64 / 10f64.powi(decimals as i32));
-                continue;
+            let token_amount_in_tokens = (token_account.amount as f64) / (10f64.powi(decimals as i32));
+            let percentage_of_supply = (token_account.amount as f64) / (mint_data.supply as f64);
+
+            // Only check for pools if they hold more than 0.5% of supply
+            if percentage_of_supply > 0.001 {
+                // Check known LP addresses
+                if excluded_owners.contains(&token_account.owner.to_string().as_str()) {
+                    tracing::info!("Excluded known LP {} holding {:.2}% of supply", 
+                        token_account.owner.to_string(),
+                        percentage_of_supply * 100.0);
+                    continue;
+                }
+
+                // Check program-owned accounts
+                if let Ok(owner_account) = client.get_account(&token_account.owner).await {
+                    if program_ids.contains(&owner_account.owner.to_string().as_str()) {
+                        tracing::info!("Excluded program-owned account {} holding {:.2}% of supply", 
+                            token_account.owner.to_string(),
+                            percentage_of_supply * 100.0);
+                        continue;
+                    }
+                }
             }
-            
+
             token_holders.push((pubkey.to_string(), token_account.amount));
             
-            let token_amount_in_tokens = (token_account.amount as f64) / (10f64.powi(decimals as i32));
             for (i, threshold) in min_tokens_for_threshold.iter().enumerate() {
                 if token_amount_in_tokens >= *threshold {
                     threshold_counts[i] += 1;
@@ -139,7 +157,7 @@ async fn main() -> Result<()> {
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set");
     let rpc_url = format!("https://rpc.helius.xyz/?api-key={}", api_key);
     let rpc_client = RpcClient::new(rpc_url);
-    let mint_address = "F9GqoJRPzQnGzvP7cQzLHB7C22DToHQYWfsPvhKwqrpC";
+    let mint_address = "HNg5PYJmtqcmzXrv6S9zP1CDKk5BgDuyFBxbvNApump";
     
     let price_in_usd = get_token_price(mint_address).await.expect("Failed to fetch token price");
 
