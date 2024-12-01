@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set");
     let rpc_url = format!("https://rpc.helius.xyz/?api-key={}", api_key);
     let rpc_client = RpcClient::new(rpc_url);
-    let mint_address = "7qBKePC5SqZKDRNsbNhqD6Y6S8JW2CM3KoRv3ztDpump";
+    let mint_address = "F9GqoJRPzQnGzvP7cQzLHB7C22DToHQYWfsPvhKwqrpC";
     
     let price_in_usd = get_token_price(mint_address).await.expect("Failed to fetch token price");
 
