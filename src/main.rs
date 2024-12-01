@@ -72,7 +72,18 @@ async fn get_token_holders(
         },
     ).await?;
 
-    let mut token_holders = Vec::new();
+    // First, convert accounts to a more workable format and sort by size
+    let mut token_holders: Vec<(String, u64, Pubkey)> = accounts.into_iter()
+        .filter_map(|(pubkey, account)| {
+            TokenAccount::unpack(&account.data).ok()
+                .map(|token_account| (pubkey.to_string(), token_account.amount, token_account.owner))
+        })
+        .collect();
+    
+    token_holders.sort_by(|a, b| b.1.cmp(&a.1));  // Sort by amount (descending)
+
+    // Process sorted holders
+    let mut final_holders = Vec::new();
     let program_ids = vec![
         "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium concentrated
         "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
@@ -82,43 +93,50 @@ async fn get_token_holders(
         "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", //Raydium LP
     ];
 
-    for (pubkey, account) in accounts {
-        if let Ok(token_account) = TokenAccount::unpack(&account.data) {
-            let token_amount_in_tokens = (token_account.amount as f64) / (10f64.powi(decimals as i32));
-            let percentage_of_supply = (token_account.amount as f64) / (mint_data.supply as f64);
+    for (pubkey, amount, owner) in token_holders {
+        let percentage_of_supply = (amount as f64) / (mint_data.supply as f64);
+        
+        // Early exit from expensive checks if holding is too small
+        if percentage_of_supply < 0.005 {
+            final_holders.push((pubkey, amount));
+            continue;
+        }
 
-            // Only check for pools if they hold more than 0.5% of supply
-            if percentage_of_supply > 0.001 {
-                // Check known LP addresses
-                if excluded_owners.contains(&token_account.owner.to_string().as_str()) {
-                    tracing::info!("Excluded known LP {} holding {:.2}% of supply", 
-                        token_account.owner.to_string(),
-                        percentage_of_supply * 100.0);
-                    continue;
-                }
-
-                // Check program-owned accounts
-                if let Ok(owner_account) = client.get_account(&token_account.owner).await {
-                    if program_ids.contains(&owner_account.owner.to_string().as_str()) {
-                        tracing::info!("Excluded program-owned account {} holding {:.2}% of supply", 
-                            token_account.owner.to_string(),
-                            percentage_of_supply * 100.0);
-                        continue;
-                    }
-                }
+        // Check exclusions only for large holders
+        let should_exclude = if excluded_owners.contains(&owner.to_string().as_str()) {
+            tracing::info!("Excluded known LP {} holding {:.2}% of supply", 
+                owner.to_string(),
+                percentage_of_supply * 100.0);
+            true
+        } else if let Ok(owner_account) = client.get_account(&owner).await {
+            if program_ids.contains(&owner_account.owner.to_string().as_str()) {
+                tracing::info!("Excluded program-owned account {} holding {:.2}% of supply", 
+                    owner.to_string(),
+                    percentage_of_supply * 100.0);
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
 
-            token_holders.push((pubkey.to_string(), token_account.amount));
-            
-            for (i, threshold) in min_tokens_for_threshold.iter().enumerate() {
-                if token_amount_in_tokens >= *threshold {
-                    threshold_counts[i] += 1;
-                }
+        if !should_exclude {
+            final_holders.push((pubkey, amount));
+        }
+    }
+
+    // Update threshold counts
+    for (_, amount) in &final_holders {
+        let token_amount_in_tokens = (*amount as f64) / (10f64.powi(decimals as i32));
+        for (i, threshold) in min_tokens_for_threshold.iter().enumerate() {
+            if token_amount_in_tokens >= *threshold {
+                threshold_counts[i] += 1;
             }
         }
     }
 
-    token_holders.sort_by(|a, b| b.1.cmp(&a.1));
+    final_holders.sort_by(|a, b| b.1.cmp(&a.1));
     let total_supply = mint_data.supply;
     
     // First show token info
@@ -139,14 +157,14 @@ async fn get_token_holders(
     tracing::info!("=== Holder Concentration ===");
     let concentration_points = vec![1, 10, 25, 50, 100, 250];
     for &n in &concentration_points {
-        if n <= token_holders.len() {
-            let sum: u64 = token_holders.iter().take(n).map(|(_, amount)| amount).sum();
+        if n <= final_holders.len() {
+            let sum: u64 = final_holders.iter().take(n).map(|(_, amount)| amount).sum();
             let percentage = (sum as f64 / total_supply as f64) * 100.0;
             tracing::info!("Top {} Holders: {:.2}%", n, percentage);
         }
     }
 
-    Ok(token_holders)
+    Ok(final_holders)
 }
 
 #[tokio::main]
