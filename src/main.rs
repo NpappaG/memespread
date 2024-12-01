@@ -15,6 +15,8 @@ use solana_account_decoder::UiAccountEncoding;
 use spl_token::state::Account as TokenAccount;
 use reqwest;
 use serde_json::Value;
+use rayon::prelude::*;
+use std::collections::HashSet;
 
 async fn get_token_price(mint_address: &str) -> Result<f64, Box<dyn std::error::Error>> {
     let url = format!("https://api.jup.ag/price/v2?ids={}", mint_address);
@@ -72,8 +74,8 @@ async fn get_token_holders(
         },
     ).await?;
 
-    // First, convert accounts to a more workable format and sort by size
-    let mut token_holders: Vec<(String, u64, Pubkey)> = accounts.into_iter()
+    // Convert accounts to parallel iterator for initial processing
+    let mut token_holders: Vec<(String, u64, Pubkey)> = accounts.into_par_iter()
         .filter_map(|(pubkey, account)| {
             TokenAccount::unpack(&account.data).ok()
                 .map(|token_account| (pubkey.to_string(), token_account.amount, token_account.owner))
@@ -82,48 +84,103 @@ async fn get_token_holders(
     
     token_holders.sort_by(|a, b| b.1.cmp(&a.1));  // Sort by amount (descending)
 
-    // Process sorted holders
     let mut final_holders = Vec::new();
-    let program_ids = vec![
+    let program_ids: HashSet<&str> = vec![
         "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium concentrated
         "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
-    ];
+    ].into_iter().collect();
 
-    let excluded_owners = vec![
+    let excluded_owners: HashSet<&str> = vec![
         "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", //Raydium LP
-    ];
+    ].into_iter().collect();
 
+    let threshold = 0.001; // This is 0.1%
+
+    // Get all holders above threshold
+    let large_holders: Vec<Pubkey> = token_holders.iter()
+        .filter(|(_, amount, _)| {
+            let percentage = (*amount as f64) / (mint_data.supply as f64);
+            percentage >= threshold
+        })
+        .map(|(_, _, owner)| *owner)
+        .collect();
+
+    tracing::info!("Found {} holders above {}%", large_holders.len(), threshold * 100.0);
+
+    // Process in smaller chunks
+    let chunk_size = 25; // Reduced from 100 to 25
+    let mut program_owned_accounts = HashSet::new();
+
+    let mut rpc_calls = 0;
+    
+    // Process chunks concurrently in groups of 4 (100 total)
+    for (batch_num, chunks) in large_holders.chunks(chunk_size * 4).enumerate() {
+        let mut futures = vec![];
+        
+        // Create futures for each chunk
+        for chunk in chunks.chunks(chunk_size) {
+            futures.push(client.get_multiple_accounts(chunk));
+            rpc_calls += 1;
+        }
+
+        let futures_len = futures.len();  // Capture length before move
+        
+        // Execute chunks concurrently
+        let results = futures::future::join_all(futures).await;
+        tracing::info!("Processing batch {}: {} accounts total ({} RPC calls)", 
+            batch_num + 1, 
+            chunks.len(),
+            futures_len);  // Use captured length
+        
+        // Process results
+        for (chunk_num, (chunk, result)) in chunks.chunks(chunk_size).zip(results).enumerate() {
+            if let Ok(accounts_batch) = result {
+                tracing::info!("  Processed chunk {}: {} accounts", chunk_num + 1, chunk.len());
+                chunk.iter()
+                    .zip(accounts_batch.iter())
+                    .filter_map(|(owner, account_opt)| {
+                        account_opt.as_ref().and_then(|account| {
+                            if program_ids.contains(account.owner.to_string().as_str()) {
+                                Some(*owner)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .for_each(|owner| { program_owned_accounts.insert(owner); });
+            }
+        }
+    }
+    
+    tracing::info!("Total RPC calls made: {}", rpc_calls);
+
+    tracing::info!("Found {} program-owned accounts", program_owned_accounts.len());
+
+    // Process all holders with cached program checks
     for (pubkey, amount, owner) in token_holders {
         let percentage_of_supply = (amount as f64) / (mint_data.supply as f64);
         
-        // Early exit from expensive checks if holding is too small
-        if percentage_of_supply < 0.005 {
+        if percentage_of_supply < 0.001 {
             final_holders.push((pubkey, amount));
             continue;
         }
 
-        // Check exclusions only for large holders
-        let should_exclude = if excluded_owners.contains(&owner.to_string().as_str()) {
+        let owner_str = owner.to_string();
+        if excluded_owners.contains(owner_str.as_str()) {
             tracing::info!("Excluded known LP {} holding {:.2}% of supply", 
-                owner.to_string(),
+                owner_str,
                 percentage_of_supply * 100.0);
-            true
-        } else if let Ok(owner_account) = client.get_account(&owner).await {
-            if program_ids.contains(&owner_account.owner.to_string().as_str()) {
-                tracing::info!("Excluded program-owned account {} holding {:.2}% of supply", 
-                    owner.to_string(),
-                    percentage_of_supply * 100.0);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !should_exclude {
-            final_holders.push((pubkey, amount));
+            continue;
         }
+
+        if program_owned_accounts.contains(&owner) {
+            tracing::info!("Excluded program-owned account {} holding {:.2}% of supply", 
+                owner_str,
+                percentage_of_supply * 100.0);
+            continue;
+        }
+
+        final_holders.push((pubkey, amount));
     }
 
     // Update threshold counts
@@ -175,7 +232,7 @@ async fn main() -> Result<()> {
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set");
     let rpc_url = format!("https://rpc.helius.xyz/?api-key={}", api_key);
     let rpc_client = RpcClient::new(rpc_url);
-    let mint_address = "HNg5PYJmtqcmzXrv6S9zP1CDKk5BgDuyFBxbvNApump";
+    let mint_address = "8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn";
     
     let price_in_usd = get_token_price(mint_address).await.expect("Failed to fetch token price");
 
