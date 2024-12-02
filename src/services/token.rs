@@ -17,6 +17,7 @@ use rayon::prelude::*;
 use futures;
 use crate::types::models::{TokenHolderStats, HolderThreshold, ConcentrationMetric};
 use serde_json::Value;
+use super::excluded_accounts::{PROGRAM_IDS, EXCLUDED_OWNERS};
 
 async fn fetch_and_sort_holders(
     client: &Arc<RpcClient>,
@@ -56,18 +57,24 @@ async fn identify_program_owned_accounts(
     client: &Arc<RpcClient>,
     holders: &[(String, u64, Pubkey)],
     mint_supply: u64,
+    market_cap: f64,
 ) -> Result<HashSet<Pubkey>, anyhow::Error> {
-    let program_ids: HashSet<&str> = vec![
-        "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium concentrated
-        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
-    ].into_iter().collect();
+    let program_ids: HashSet<&str> = PROGRAM_IDS.iter().copied().collect();
+    let excluded_owners: HashSet<&str> = EXCLUDED_OWNERS.iter().copied().collect();
 
-    let excluded_owners: HashSet<&str> = vec![
-        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", //Raydium LP
-    ].into_iter().collect();
+    // Dynamic threshold based on market cap (in USD)
+    let threshold = match market_cap {
+        mc if mc > 1_000_000_000.0 => 0.005,  // 0.5% for >$1B market cap
+        mc if mc > 100_000_000.0 => 0.003,    // 0.2% for >$100M market cap
+        mc if mc > 10_000_000.0 => 0.002,     // 0.1% for >$10M market cap
+        mc if mc > 5_000_000.0 => 0.001,     // 0.1% for >$10M market cap
+        _ => 0.0003                         // 0.05% for smaller market caps
+    };
 
-    //Filter out LPs and pools that are less than 0.1% of the supply
-    let threshold = 0.001; //.1% or more are looked at
+    tracing::info!("Using threshold of {}% based on ${:.2}M market cap", 
+        threshold * 100.0, 
+        market_cap / 1_000_000.0);
+
     let large_holders: Vec<(Pubkey, f64)> = holders.iter()
         .filter_map(|(_, amount, owner)| {
             let percentage = (*amount as f64) / (mint_supply as f64);
@@ -171,8 +178,11 @@ pub async fn get_token_holders(
         price_in_usd
     };
 
+    let supply = mint_data.supply as f64 / 10f64.powi(mint_data.decimals as i32);
+    let market_cap = supply * price;
+
     let holders = fetch_and_sort_holders(client, &mint_pubkey).await?;
-    let program_owned = identify_program_owned_accounts(client, &holders, mint_data.supply).await?;
+    let program_owned = identify_program_owned_accounts(client, &holders, mint_data.supply, market_cap).await?;
     let final_holders: Vec<(String, u64)> = holders.into_iter()
         .filter(|(_, _, owner)| {
             !program_owned.contains(owner)
@@ -272,6 +282,20 @@ fn calculate_holder_stats(
         tracing::info!("Top {} Holders: {:.2}%", metric.top_n, metric.percentage);
     }
 
+    // Calculate HHI and Distribution Score
+    let total_supply = mint_data.supply as f64;
+    let hhi: f64 = holders.iter()
+        .map(|(_, amount)| {
+            let market_share = (*amount as f64 / total_supply) * 100.0;
+            market_share * market_share
+        })
+        .sum();
+
+    let distribution_score = calculate_distribution_score(holders, mint_data.supply);
+
+    tracing::info!("Herfindahl-Hirschman Index: {:.2}", hhi);
+    tracing::info!("Distribution Score: {:.2}", distribution_score);
+
     TokenHolderStats {
         price: price_in_usd,
         supply,
@@ -279,5 +303,37 @@ fn calculate_holder_stats(
         decimals,
         holder_thresholds,
         concentration_metrics,
+        hhi,
+        distribution_score,
     }
+}
+
+
+fn calculate_distribution_score(holders: &[(String, u64)], total_supply: u64) -> f64 {
+    if holders.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted_holders = holders.to_vec();
+    sorted_holders.sort_by(|a, b| a.1.cmp(&b.1)); // Sort in ascending order
+
+    let n = sorted_holders.len() as f64;
+    let total_supply_f64 = total_supply as f64;
+    
+    let mut numerator = 0.0;
+    for (i, (_, amount)) in sorted_holders.iter().enumerate() {
+        let amount_f64 = *amount as f64;
+        for (_, other_amount) in sorted_holders.iter() {
+            let other_amount_f64 = *other_amount as f64;
+            numerator += (amount_f64 - other_amount_f64).abs();
+        }
+    }
+
+    // Calculate Gini coefficient
+    let gini = numerator / (2.0 * n * n * total_supply_f64 / n);
+
+    // Convert to distribution score (0-100)
+    let distribution_score = (1.0 - gini) * 100.0;
+
+    distribution_score.clamp(0.0, 100.0)
 }

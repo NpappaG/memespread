@@ -14,6 +14,8 @@ pub struct TokenHolderStats {
     pub decimals: u8,
     pub holder_thresholds: Vec<HolderThreshold>,
     pub concentration_metrics: Vec<ConcentrationMetric>,
+    pub hhi: f64,
+    pub distribution_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
