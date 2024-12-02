@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use rayon::prelude::*;
 use futures;
 use crate::types::models::{TokenHolderStats, HolderThreshold, ConcentrationMetric};
+use serde_json::Value;
 
 async fn fetch_and_sort_holders(
     client: &Arc<RpcClient>,
@@ -134,20 +135,19 @@ async fn identify_program_owned_accounts(
     Ok(excluded_accounts)
 }
 
-fn filter_final_holders(
-    holders: Vec<(String, u64, Pubkey)>,
-    excluded_accounts: HashSet<Pubkey>,
-    mint_supply: u64,
-) -> Vec<(String, u64)> {
-    holders.into_iter()
-        .filter(|(_, amount, owner)| {
-            let percentage = (*amount as f64) / (mint_supply as f64);
-            if percentage < 0.001 { return true; }
-            !excluded_accounts.contains(owner)
-        })
-        .map(|(pubkey, amount, _)| (pubkey, amount))
-        .take(300)
-        .collect()
+async fn get_token_price(mint_address: &str) -> Result<f64, anyhow::Error> {
+    let url = format!("https://api.jup.ag/price/v2?ids={}", mint_address);
+    let response = reqwest::get(url).await?;
+    let json: Value = response.json().await?;
+    
+    tracing::info!("Jupiter API response: {:?}", json);
+    
+    let price = json["data"][mint_address]["price"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse price"))?
+        .parse::<f64>()?;
+    
+    Ok(price)
 }
 
 pub async fn get_token_holders(
@@ -161,11 +161,23 @@ pub async fn get_token_holders(
     let mint_account = client.get_account(&mint_pubkey).await?;
     let mint_data = spl_token::state::Mint::unpack(&mint_account.data)?;
 
+    // Fetch the current price if not provided
+    let price = if price_in_usd == 0.0 {
+        get_token_price(mint_address).await?
+    } else {
+        price_in_usd
+    };
+
     let holders = fetch_and_sort_holders(client, &mint_pubkey).await?;
     let program_owned = identify_program_owned_accounts(client, &holders, mint_data.supply).await?;
-    let final_holders = filter_final_holders(holders, program_owned, mint_data.supply);
+    let final_holders: Vec<(String, u64)> = holders.into_iter()
+        .filter(|(_, _, owner)| {
+            !program_owned.contains(owner)
+        })
+        .map(|(pubkey, amount, _)| (pubkey, amount))
+        .collect();
 
-    Ok(calculate_holder_stats(&final_holders, &mint_data, price_in_usd))
+    Ok(calculate_holder_stats(&final_holders, &mint_data, price))
 }
 
 fn calculate_holder_stats(
@@ -173,45 +185,85 @@ fn calculate_holder_stats(
     mint_data: &Mint,
     price_in_usd: f64,
 ) -> TokenHolderStats {
-    let supply = mint_data.supply as f64 / 10f64.powi(mint_data.decimals as i32);
+    let decimals = mint_data.decimals;
+    let supply = mint_data.supply as f64 / 10f64.powi(decimals as i32);
     let market_cap = supply * price_in_usd;
 
-    // Calculate holder thresholds ($100, $1000, $10000, etc.)
-    let thresholds = vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0];
-    let holder_thresholds: Vec<HolderThreshold> = thresholds.iter().map(|threshold| {
-        let token_amount = threshold / price_in_usd;
-        let raw_amount = (token_amount * 10f64.powi(mint_data.decimals as i32)) as u64;
-        
-        let count = holders.iter()
-            .filter(|(_, amount)| *amount >= raw_amount)
-            .count();
+    // Log token info
+    tracing::info!("=== Token Info ===");
+    tracing::info!("  Price: ${}", price_in_usd);
+    tracing::info!("  Supply: {:.2} tokens", supply);
+    tracing::info!("  Market Cap: ${:.2}", market_cap);
+    tracing::info!("  Decimals: {}", decimals);
 
-        HolderThreshold {
-            usd_threshold: *threshold,
-            count: count as i32,
-            percentage: (count as f64 / holders.len() as f64) * 100.0,
-        }
-    }).collect();
+    // Calculate minimum tokens needed for each USD threshold
+    let usd_thresholds = vec![10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0];
+    let min_tokens_for_threshold: Vec<u64> = usd_thresholds.iter()
+        .map(|usd| ((usd / price_in_usd) * 10f64.powi(decimals as i32)) as u64)
+        .collect();
 
-    // Calculate concentration metrics (top 10, 50, 100, etc.)
-    let top_ns = vec![10, 50, 100, 200];
-    let concentration_metrics: Vec<ConcentrationMetric> = top_ns.iter().map(|&n| {
-        let sum: u64 = holders.iter()
-            .take(n as usize)
-            .map(|(_, amount)| *amount)
-            .sum();
-        
-        ConcentrationMetric {
-            top_n: n,
-            percentage: (sum as f64 / mint_data.supply as f64) * 100.0,
+    // Count holders meeting each threshold
+    let mut threshold_counts = vec![0; usd_thresholds.len()];
+    for (_, amount) in holders {
+        for (i, threshold) in min_tokens_for_threshold.iter().enumerate() {
+            if amount >= threshold {
+                threshold_counts[i] += 1;
+            }
         }
-    }).collect();
+    }
+
+    let total_holders = holders.len();
+    let holder_thresholds: Vec<HolderThreshold> = usd_thresholds.iter()
+        .zip(threshold_counts.iter())
+        .map(|(usd, &count)| {
+            let percentage = if total_holders > 0 {
+                (count as f64 / total_holders as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            tracing::info!("${:.2} threshold:", usd);
+            tracing::info!("  Required tokens: {:.2}", usd / price_in_usd);
+            tracing::info!("  Holders meeting threshold: {} ({:.2}%)", count, percentage);
+
+            HolderThreshold {
+                usd_threshold: *usd,
+                count: count as i32,
+                percentage,
+            }
+        })
+        .collect();
+
+    // Calculate concentration metrics using top 300 holders
+    let mut sorted_holders = holders.to_vec();
+    sorted_holders.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let concentration_points = vec![1, 10, 25, 50, 100, 250];
+    let concentration_metrics: Vec<ConcentrationMetric> = concentration_points.iter()
+        .map(|&n| {
+            if n <= sorted_holders.len() {
+                let sum: u64 = sorted_holders.iter().take(n).map(|(_, amount)| amount).sum();
+                let percentage = (sum as f64 / mint_data.supply as f64) * 100.0;
+                tracing::info!("Top {} Holders: {:.2}%", n, percentage);
+
+                ConcentrationMetric {
+                    top_n: n as i32,
+                    percentage,
+                }
+            } else {
+                ConcentrationMetric {
+                    top_n: n as i32,
+                    percentage: 0.0,
+                }
+            }
+        })
+        .collect();
 
     TokenHolderStats {
         price: price_in_usd,
         supply,
         market_cap,
-        decimals: mint_data.decimals,
+        decimals,
         holder_thresholds,
         concentration_metrics,
     }
