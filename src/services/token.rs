@@ -208,22 +208,38 @@ pub async fn get_token_holders(
     // Log the final holder count
     tracing::info!("Final holder count (accounts with balance > 1): {}", final_holders.len());
 
+    // Calculate other metrics while distribution metrics are being computed
     let result = calculate_holder_stats(&final_holders, &mint_data, price);
     
-    // Create TokenHolderStats with the holder count
+    // Instead of awaiting, spawn the task and return immediately
+    let holders_for_distro = final_holders.clone();
+    let supply_for_distro = mint_data.supply;
+    
+    // Spawn the distribution calculation as a separate task
+    tokio::spawn(async move {
+        let distro_start = std::time::Instant::now();
+        let (_hhi, _distribution_score) = calculate_distribution_metrics_async(holders_for_distro, supply_for_distro).await;
+        let distro_duration = distro_start.elapsed();
+        tracing::info!("Distribution metrics calculation took: {:?}", distro_duration);
+        
+        // Here you would send the results to a cache, database, or websocket
+        // Example: cache.set(format!("distro_metrics:{}", mint_address), (hhi, distribution_score)).await;
+    });
+
     let token_holder_stats = TokenHolderStats {
         price,
-        supply,
+        supply: supply as f64,
         market_cap,
         decimals: mint_data.decimals,
-        holders: holder_count,  // Use the holder count here
+        holders: holder_count,
         holder_thresholds: result.holder_thresholds,
         concentration_metrics: result.concentration_metrics,
-        hhi: result.hhi,
-        distribution_score: result.distribution_score,
+        hhi: 0.0, // Will be updated later
+        distribution_score: 0.0, // Will be updated later
     };
 
-    tracing::info!("Total operation took: {:?}", operation_start.elapsed());
+    let total_duration = operation_start.elapsed();
+    tracing::info!("Initial stats calculation took: {:?}", total_duration);
     
     Ok(token_holder_stats)
 }
@@ -330,20 +346,6 @@ fn calculate_holder_stats(
         tracing::info!("Top {} Holders: {:.2}%", metric.top_n, metric.percentage);
     }
 
-    // Calculate HHI and Distribution Score
-    let total_supply = mint_data.supply as f64;
-    let hhi: f64 = holders.iter()
-        .map(|(_, amount)| {
-            let market_share = (*amount as f64 / total_supply) * 100.0;
-            market_share * market_share
-        })
-        .sum();
-
-    let distribution_score = calculate_distribution_score(holders, mint_data.supply);
-
-    tracing::info!("Herfindahl-Hirschman Index: {:.2}", hhi);
-    tracing::info!("Distribution Score: {:.2}", distribution_score);
-
     TokenHolderStats {
         price: price_in_usd,
         supply,
@@ -352,11 +354,35 @@ fn calculate_holder_stats(
         holders: total_holders,
         holder_thresholds,
         concentration_metrics,
-        hhi,
-        distribution_score,
+        hhi: 0.0,
+        distribution_score: 0.0,
     }
 }
 
+pub async fn calculate_distribution_metrics_async(
+    holders: Vec<(String, u64)>,
+    total_supply: u64,
+) -> (f64, f64) {
+    // Spawn the heavy computation in a blocking task
+    tokio::task::spawn_blocking(move || {
+        let total_supply_f64 = total_supply as f64;
+        
+        // Calculate HHI
+        let hhi: f64 = holders.iter()
+            .map(|(_, amount)| {
+                let market_share = (*amount as f64 / total_supply_f64) * 100.0;
+                market_share * market_share
+            })
+            .sum();
+
+        // Calculate distribution score
+        let distribution_score = calculate_distribution_score(&holders, total_supply);
+
+        (hhi, distribution_score)
+    })
+    .await
+    .unwrap_or((0.0, 0.0))
+}
 
 fn calculate_distribution_score(holders: &[(String, u64)], total_supply: u64) -> f64 {
     if holders.is_empty() {
