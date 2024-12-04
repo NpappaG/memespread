@@ -12,6 +12,7 @@ pub struct TokenStatsRecord {
     pub supply: f64,
     pub market_cap: f64,
     pub decimals: i32,
+    pub holders: i32,
     pub holder_thresholds: Json<Vec<HolderThreshold>>,
     pub concentration_metrics: Json<Vec<ConcentrationMetric>>,
 }

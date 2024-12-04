@@ -22,7 +22,8 @@ use super::excluded_accounts::{PROGRAM_IDS, EXCLUDED_OWNERS};
 async fn fetch_and_sort_holders(
     client: &Arc<RpcClient>,
     mint_pubkey: &Pubkey,
-) -> Result<Vec<(String, u64, Pubkey)>, anyhow::Error> {
+    min_balance: u64,
+) -> Result<(Vec<(String, u64, Pubkey)>, usize), anyhow::Error> {
     let config = solana_client::rpc_config::RpcProgramAccountsConfig {
         filters: Some(vec![
             solana_client::rpc_filter::RpcFilterType::Memcmp(Memcmp::new(
@@ -45,12 +46,22 @@ async fn fetch_and_sort_holders(
         .into_par_iter()
         .filter_map(|(pubkey, account)| {
             TokenAccount::unpack(&account.data).ok()
+                .filter(|token_account| {
+                    token_account.amount > min_balance && 
+                    token_account.state == spl_token::state::AccountState::Initialized
+                })
                 .map(|token_account| (pubkey.to_string(), token_account.amount, token_account.owner))
         })
         .collect();
     
+    let holder_count = holders.len();
+    tracing::info!("Found {} accounts with balance > {}", holder_count, min_balance);
+
+    let unique_owners: HashSet<_> = holders.iter().map(|(_, _, owner)| owner).collect();
+    tracing::info!("Found {} unique owners with balance > {}", unique_owners.len(), min_balance);
+    
     holders.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(holders)
+    Ok((holders, holder_count))
 }
 
 async fn identify_program_owned_accounts(
@@ -181,19 +192,40 @@ pub async fn get_token_holders(
     let supply = mint_data.supply as f64 / 10f64.powi(mint_data.decimals as i32);
     let market_cap = supply * price;
 
-    let holders = fetch_and_sort_holders(client, &mint_pubkey).await?;
+    // Specify the minimum balance here
+    let min_balance = 1; // Example: set to 1 to exclude zero-balance accounts
+
+    // Unpack the tuple returned by fetch_and_sort_holders
+    let (holders, holder_count) = fetch_and_sort_holders(client, &mint_pubkey, min_balance).await?;
+    
+    // Use only the holders vector for identify_program_owned_accounts
     let program_owned = identify_program_owned_accounts(client, &holders, mint_data.supply, market_cap).await?;
     let final_holders: Vec<(String, u64)> = holders.into_iter()
-        .filter(|(_, _, owner)| {
-            !program_owned.contains(owner)
-        })
+        .filter(|(_, _, owner)| !program_owned.contains(owner))
         .map(|(pubkey, amount, _)| (pubkey, amount))
         .collect();
 
+    // Log the final holder count
+    tracing::info!("Final holder count (accounts with balance > 1): {}", final_holders.len());
+
     let result = calculate_holder_stats(&final_holders, &mint_data, price);
+    
+    // Create TokenHolderStats with the holder count
+    let token_holder_stats = TokenHolderStats {
+        price,
+        supply,
+        market_cap,
+        decimals: mint_data.decimals,
+        holders: holder_count,  // Use the holder count here
+        holder_thresholds: result.holder_thresholds,
+        concentration_metrics: result.concentration_metrics,
+        hhi: result.hhi,
+        distribution_score: result.distribution_score,
+    };
+
     tracing::info!("Total operation took: {:?}", operation_start.elapsed());
     
-    Ok(result)
+    Ok(token_holder_stats)
 }
 
 fn calculate_holder_stats(
@@ -210,6 +242,7 @@ fn calculate_holder_stats(
     tracing::info!("  Supply: {:.2} tokens", supply);
     tracing::info!("  Market Cap: ${:.2}", market_cap);
     tracing::info!("  Decimals: {}", decimals);
+    tracing::info!("  Total Holders for calculations: {}", holders.len());
 
     // Calculate minimum tokens needed for each USD threshold
     let usd_thresholds = vec![10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0];
@@ -227,23 +260,38 @@ fn calculate_holder_stats(
         .collect();
 
     let total_holders = holders.len();
+    let holders_above_10 = threshold_counts[0]; // Count of holders above $10
+
     let holder_thresholds: Vec<HolderThreshold> = usd_thresholds.iter()
         .zip(threshold_counts.iter())
         .map(|(usd, &count)| {
-            let percentage = if total_holders > 0 {
+            let percentage_of_total = if total_holders > 0 {
                 (count as f64 / total_holders as f64) * 100.0
             } else {
                 0.0
             };
-            
+
+            let percentage_of_10 = if holders_above_10 > 0 {
+                (count as f64 / holders_above_10 as f64) * 100.0
+            } else {
+                0.0
+            };
+
             tracing::info!("${:.2} threshold:", usd);
             tracing::info!("  Required tokens: {:.2}", usd / price_in_usd);
-            tracing::info!("  Holders meeting threshold: {} ({:.2}%)", count, percentage);
+            tracing::info!("  Holders meeting threshold: {} ({:.2}% of total [{} holders], {:.2}% of $10+ holders [{} holders])", 
+                count,
+                percentage_of_total,
+                total_holders,
+                percentage_of_10,
+                holders_above_10
+            );
 
             HolderThreshold {
                 usd_threshold: *usd,
                 count: count as i32,
-                percentage,
+                percentage: percentage_of_total,
+                percentage_of_10,
             }
         })
         .collect();
@@ -301,6 +349,7 @@ fn calculate_holder_stats(
         supply,
         market_cap,
         decimals,
+        holders: total_holders,
         holder_thresholds,
         concentration_metrics,
         hhi,
@@ -321,7 +370,7 @@ fn calculate_distribution_score(holders: &[(String, u64)], total_supply: u64) ->
     let total_supply_f64 = total_supply as f64;
     
     let mut numerator = 0.0;
-    for (i, (_, amount)) in sorted_holders.iter().enumerate() {
+    for (_i, (_, amount)) in sorted_holders.iter().enumerate() {
         let amount_f64 = *amount as f64;
         for (_, other_amount) in sorted_holders.iter() {
             let other_amount_f64 = *other_amount as f64;
