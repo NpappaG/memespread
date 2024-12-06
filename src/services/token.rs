@@ -18,6 +18,9 @@ use futures;
 use crate::types::models::{TokenHolderStats, HolderThreshold, ConcentrationMetric};
 use serde_json::Value;
 use super::excluded_accounts::{PROGRAM_IDS, EXCLUDED_OWNERS};
+use tracing::info;
+use chrono::Utc;
+use clickhouse::Client;
 
 async fn fetch_and_sort_holders(
     client: &Arc<RpcClient>,
@@ -240,6 +243,27 @@ pub async fn get_token_holders(
 
     let total_duration = operation_start.elapsed();
     tracing::info!("Initial stats calculation took: {:?}", total_duration);
+    
+    let current_timestamp = Utc::now().naive_utc()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    
+    // Create ClickHouse client
+    let clickhouse_client = Client::default()
+        .with_url("http://localhost:8123")
+        .with_database("default");
+
+    info!("Attempting to save stats to ClickHouse for mint address: {}", mint_address);
+    clickhouse_client
+        .query(
+            "INSERT INTO monitored_tokens (mint_address, last_stats_update, last_metrics_update) VALUES (?, ?, ?)"
+        )
+        .bind(mint_address)
+        .bind(&current_timestamp)
+        .bind(&current_timestamp)
+        .execute()
+        .await?;
+    info!("Successfully saved stats to ClickHouse for mint address: {}", mint_address);
     
     Ok(token_holder_stats)
 }
