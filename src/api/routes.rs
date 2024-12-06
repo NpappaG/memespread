@@ -5,10 +5,12 @@ use tower_http::cors::CorsLayer;
 use super::handlers::token_stats;
 use axum::http::{Method, HeaderValue};
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
+use clickhouse::Client;
 
 pub type AppState = (
     Arc<RpcClient>,
-    Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>
+    Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    Client
 );
 
 pub fn create_router(state: AppState) -> Router {

@@ -7,13 +7,18 @@ use std::sync::Arc;
 use serde_json::json;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
+use clickhouse::Client;
 
 use crate::types::models::{TokenQuery, TokenHolderStats};
 use crate::services::token::get_token_holders;
 
 pub async fn token_stats(
   Query(params): Query<TokenQuery>,
-  State((rpc_client, rate_limiter)): State<(Arc<RpcClient>, Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>)>,
+  State((rpc_client, rate_limiter, _db)): State<(
+    Arc<RpcClient>,
+    Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    Client
+  )>,
 ) -> Result<Json<TokenHolderStats>, (StatusCode, Json<serde_json::Value>)> {
     // TODO: Fetch price from Jupiter API
     let price_in_usd = 0.0; // Placeholder until Jupiter integration

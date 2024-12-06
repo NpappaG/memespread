@@ -39,7 +39,25 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!("Failed to connect to RPC: {:?}", e),
     };
     
-    let state = (rpc_client.clone(), rpc_limiter.clone());
+    let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    let client = Client::default()
+        .with_url(&clickhouse_url)
+        .with_database("default");
+
+    // Initialize database schema
+    let tables = [
+        db::schema::TOKEN_STATS_SQL,
+        db::schema::MONITORED_TOKENS_SQL,
+    ];
+
+    for table in tables {
+        if let Err(e) = client.query(table).execute().await {
+            tracing::error!("Failed to initialize database schema: {:?}", e);
+            return Err(e.into());
+        }
+    }
+
+    let state = (rpc_client.clone(), rpc_limiter.clone(), client.clone());
     let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -47,17 +65,6 @@ async fn main() -> Result<()> {
     
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
-
-    let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
-    let client = Client::default()
-        .with_url(&clickhouse_url)
-        .with_database("default");
-
-    // Initialize database schema
-    if let Err(e) = client.query(db::schema::INIT_SQL).execute().await {
-        tracing::error!("Failed to initialize database schema: {:?}", e);
-        return Err(e.into());
-    }
 
     // Start the monitoring service
     monitor::start_monitoring(client, rpc_client, rpc_limiter).await;

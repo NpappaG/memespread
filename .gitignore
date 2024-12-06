@@ -29,3 +29,14 @@
 # Windows specific files
 Thumbs.db
 Desktop.ini
+
+# ClickHouse data files
+status
+store/
+metadata/
+*.status
+*.uuid
+preprocessed_configs/
+tmp/
+user_defined/
+workload/
