@@ -3,44 +3,40 @@ use std::sync::Arc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
 use crate::services::token::get_token_holders;
-use chrono::Utc;
-//use futures::StreamExt;
+use crate::db::operations::insert_token_stats;
+use crate::db::queries::get_tokens_needing_stats_update;
+use tokio::time::{sleep, Duration};
 
 pub async fn start_monitoring(
     db: Client,
     client: Arc<RpcClient>,
     rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
 ) {
-    let query = "SELECT mint_address FROM monitored_tokens WHERE last_stats_update < now() - INTERVAL 1 HOUR";
-    
-    if let Ok(mut cursor) = db.query(query).fetch::<String>() {
-        while let Ok(Some(mint_address)) = cursor.next().await {
-            if let Ok(stats) = get_token_holders(&client, &rate_limiter, &mint_address, 0.0).await {
-                let insert_query = "
-                    INSERT INTO token_stats 
-                    (timestamp, mint_address, price, supply, market_cap, decimals, holders, 
-                     holder_thresholds, concentration_metrics, hhi, distribution_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ";
-                
-                if let Err(e) = db.query(insert_query)
-                    .bind(Utc::now())
-                    .bind(&mint_address)
-                    .bind(stats.price)
-                    .bind(stats.supply)
-                    .bind(stats.market_cap)
-                    .bind(stats.decimals)
-                    .bind(stats.holders as u32)
-                    .bind(serde_json::to_string(&stats.holder_thresholds).unwrap())
-                    .bind(serde_json::to_string(&stats.concentration_metrics).unwrap())
-                    .bind(stats.hhi)
-                    .bind(stats.distribution_score)
-                    .execute()
-                    .await 
-                {
-                    tracing::error!("Failed to insert stats for {}: {:?}", mint_address, e);
+    loop {
+        tracing::info!("Starting monitoring cycle...");
+        
+        // Monitor token stats (every hour)
+        match get_tokens_needing_stats_update(&db).await {
+            Ok(tokens) => {
+                tracing::info!("Found {} tokens needing stats update", tokens.len());
+                for mint_address in tokens {
+                    tracing::debug!("Updating stats for token: {}", mint_address);
+                    match get_token_holders(&client, &rate_limiter, &mint_address, 0.0, &db).await {
+                        Ok(stats) => {
+                            match insert_token_stats(&db, &mint_address, &stats).await {
+                                Ok(_) => tracing::info!("Successfully updated stats for {}", mint_address),
+                                Err(e) => tracing::error!("Failed to insert stats for {}: {:?}", mint_address, e),
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to get token holders for {}: {:?}", mint_address, e),
+                    }
                 }
             }
+            Err(e) => tracing::error!("Failed to get tokens needing update: {:?}", e),
         }
+
+        // Sleep for 1 minute before next check
+        sleep(Duration::from_secs(60)).await;
+        tracing::debug!("Monitor cycle complete, sleeping for 60 seconds");
     }
 }

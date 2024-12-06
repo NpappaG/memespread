@@ -1,35 +1,51 @@
 use axum::{
-  extract::{Query, State},
-  Json,
-  http::StatusCode,
+    extract::{State, Query},
+    Json,
 };
+use serde::Deserialize;
 use std::sync::Arc;
-use serde_json::json;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
+use crate::services::token::get_token_holders;
+use crate::db::operations::{get_latest_token_stats, insert_token_stats};
 use clickhouse::Client;
 
-use crate::types::models::{TokenQuery, TokenHolderStats};
-use crate::services::token::get_token_holders;
-
-pub async fn token_stats(
-  Query(params): Query<TokenQuery>,
-  State((rpc_client, rate_limiter, _db)): State<(
+pub type AppState = (
     Arc<RpcClient>,
     Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-    Client
-  )>,
-) -> Result<Json<TokenHolderStats>, (StatusCode, Json<serde_json::Value>)> {
-    // TODO: Fetch price from Jupiter API
-    let price_in_usd = 0.0; // Placeholder until Jupiter integration
+    Client,
+);
 
-    match get_token_holders(&rpc_client, &rate_limiter, &params.mint_address, price_in_usd).await {
-        Ok(stats) => Ok(Json(stats)),
-        Err(e) => {
-            Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": format!("Failed to get token holders: {}", e)
-            }))))
-        }
+#[derive(Deserialize)]
+pub struct TokenParams {
+    pub mint_address: String,
+}
+
+pub async fn get_token_stats(
+    State((rpc_client, rate_limiter, db)): State<AppState>,
+    Query(params): Query<TokenParams>,
+) -> Result<Json<serde_json::Value>, String> {
+    // First try to get cached stats
+    if let Ok(Some(cached_stats)) = get_latest_token_stats(&db, &params.mint_address).await {
+        return Ok(Json(serde_json::to_value(cached_stats).unwrap()));
+    }
+    
+    // If no cached stats, fetch new ones
+    match get_token_holders(
+        &rpc_client,
+        &rate_limiter,
+        &params.mint_address,
+        0.0,
+        &db
+    ).await {
+        Ok(stats) => {
+            // Save the stats before returning
+            if let Err(e) = insert_token_stats(&db, &params.mint_address, &stats).await {
+                return Err(format!("Failed to save token stats: {}", e));
+            }
+            Ok(Json(serde_json::to_value(stats).unwrap()))
+        },
+        Err(e) => Err(format!("Failed to get token stats: {}", e)),
     }
 }
 
