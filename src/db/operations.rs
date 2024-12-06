@@ -1,16 +1,10 @@
 use anyhow::Result;
 use clickhouse::Client;
 use crate::types::models::TokenHolderStats;
-use crate::db::models::TokenStatsRecord;
-//use chrono::{DateTime, Utc};
-//use serde::Deserialize;
+use crate::db::models::{TokenStatsRecord, TokenHolderThresholdRecord, TokenConcentrationMetricRecord};
 
 pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &TokenHolderStats) -> Result<()> {
-    // Serialize the arrays to JSON strings
-    let holder_thresholds = serde_json::to_string(&stats.holder_thresholds)?;
-    let concentration_metrics = serde_json::to_string(&stats.concentration_metrics)?;
-
-    // Insert new stats observation
+    // Insert base stats
     client
         .query(
             "INSERT INTO token_stats (
@@ -19,10 +13,8 @@ pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &Tok
                 supply,
                 market_cap,
                 decimals,
-                holders,
-                holder_thresholds,
-                concentration_metrics
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                holders
+            ) VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(mint_address)
         .bind(stats.price)
@@ -30,11 +22,160 @@ pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &Tok
         .bind(stats.market_cap)
         .bind(stats.decimals as u8)
         .bind(stats.holders as u32)
-        .bind(holder_thresholds)
-        .bind(concentration_metrics)
         .execute()
         .await?;
 
+    // Insert holder thresholds
+    for threshold in &stats.holder_thresholds {
+        client
+            .query(
+                "INSERT INTO token_holder_thresholds (
+                    mint_address,
+                    usd_threshold,
+                    holder_count,
+                    percentage,
+                    percentage_of_10
+                ) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(mint_address)
+            .bind(threshold.usd_threshold)
+            .bind(threshold.count as u32)
+            .bind(threshold.percentage)
+            .bind(threshold.percentage_of_10)
+            .execute()
+            .await?;
+    }
+
+    // Insert concentration metrics
+    for metric in &stats.concentration_metrics {
+        client
+            .query(
+                "INSERT INTO token_concentration_metrics (
+                    mint_address,
+                    top_n,
+                    percentage
+                ) VALUES (?, ?, ?)"
+            )
+            .bind(mint_address)
+            .bind(metric.top_n as u32)
+            .bind(metric.percentage)
+            .execute()
+            .await?;
+    }
+
+    update_monitored_token(client, mint_address).await?;
+
+    Ok(())
+}
+
+pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Result<Option<TokenHolderStats>> {
+    // Get base stats
+    let base_stats = client
+        .query(
+            "SELECT 
+                mint_address,
+                timestamp,
+                price,
+                supply,
+                market_cap,
+                decimals,
+                holders
+            FROM token_stats 
+            WHERE mint_address = ?
+            ORDER BY timestamp DESC
+            LIMIT 1"
+        )
+        .bind(mint_address)
+        .fetch_one::<TokenStatsRecord>()
+        .await;
+
+    let base_stats = match base_stats {
+        Ok(stats) => stats,
+        Err(clickhouse::error::Error::RowNotFound) => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!(e)),
+    };
+
+    // Get holder thresholds
+    let holder_thresholds = client
+        .query(
+            "SELECT 
+                mint_address,
+                timestamp,
+                usd_threshold,
+                holder_count,
+                percentage,
+                percentage_of_10
+            FROM token_holder_thresholds
+            WHERE mint_address = ?
+            AND timestamp = ?
+            ORDER BY usd_threshold"
+        )
+        .bind(mint_address)
+        .bind(base_stats.timestamp)
+        .fetch_all::<TokenHolderThresholdRecord>()
+        .await?;
+
+    // Get concentration metrics
+    let concentration_metrics = client
+        .query(
+            "SELECT 
+                mint_address,
+                timestamp,
+                top_n,
+                percentage
+            FROM token_concentration_metrics
+            WHERE mint_address = ?
+            AND timestamp = ?
+            ORDER BY top_n"
+        )
+        .bind(mint_address)
+        .bind(base_stats.timestamp)
+        .fetch_all::<TokenConcentrationMetricRecord>()
+        .await?;
+
+    // Get latest distribution metrics
+    let distribution = client
+        .query(
+            "SELECT 
+                hhi,
+                distribution_score
+            FROM token_distribution_metrics
+            WHERE mint_address = ?
+            ORDER BY timestamp DESC
+            LIMIT 1"
+        )
+        .bind(mint_address)
+        .fetch_one::<(f64, f64)>()
+        .await;
+
+    let (hhi, distribution_score) = match distribution {
+        Ok((h, d)) => (h, d),
+        Err(_) => (0.0, 0.0),
+    };
+
+    // Convert to TokenHolderStats
+    Ok(Some(TokenHolderStats {
+        price: base_stats.price,
+        supply: base_stats.supply,
+        market_cap: base_stats.market_cap,
+        decimals: base_stats.decimals,
+        holders: base_stats.holders as usize,
+        holder_thresholds: holder_thresholds.into_iter().map(|h| crate::types::models::HolderThreshold {
+            usd_threshold: h.usd_threshold,
+            count: h.holder_count as i32,
+            percentage: h.percentage,
+            percentage_of_10: h.percentage_of_10,
+        }).collect(),
+        concentration_metrics: concentration_metrics.into_iter().map(|c| crate::types::models::ConcentrationMetric {
+            top_n: c.top_n as i32,
+            percentage: c.percentage,
+        }).collect(),
+        hhi,
+        distribution_score,
+    }))
+}
+
+async fn update_monitored_token(client: &Client, mint_address: &str) -> Result<()> {
     // First try to insert if not exists
     client
         .query(
@@ -78,35 +219,6 @@ pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &Tok
     Ok(())
 }
 
-pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Result<Option<TokenStatsRecord>> {
-    let result = client
-        .query(
-            "SELECT 
-                mint_address,
-                timestamp,
-                price,
-                supply,
-                market_cap,
-                CAST(decimals as UInt8) as decimals,
-                CAST(holders as UInt32) as holders,
-                holder_thresholds,
-                concentration_metrics
-            FROM token_stats 
-            WHERE mint_address = ?
-            ORDER BY timestamp DESC
-            LIMIT 1"
-        )
-        .bind(mint_address)
-        .fetch_one::<TokenStatsRecord>()
-        .await;
-
-    match result {
-        Ok(record) => Ok(Some(record)),
-        Err(clickhouse::error::Error::RowNotFound) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!(e)),
-    }
-}
-
 pub async fn insert_distribution_metrics(
     client: &Client, 
     mint_address: &str, 
@@ -118,7 +230,6 @@ pub async fn insert_distribution_metrics(
         mint_address, hhi, distribution_score
     );
 
-    // Insert new distribution metrics observation
     client
         .query(
             "INSERT INTO token_distribution_metrics (
@@ -131,34 +242,8 @@ pub async fn insert_distribution_metrics(
         .bind(hhi)
         .bind(distribution_score)
         .execute()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to insert distribution metrics: {}", e))?;
+        .await?;
 
-    // First try to insert
-    client
-        .query(
-            "INSERT INTO monitored_tokens (
-                mint_address,
-                last_stats_update,
-                last_metrics_update
-            ) 
-            SELECT 
-                ?,
-                now(),
-                now()
-            WHERE NOT EXISTS (
-                SELECT 1 
-                FROM monitored_tokens FINAL 
-                WHERE mint_address = ?
-            )"
-        )
-        .bind(mint_address)
-        .bind(mint_address)
-        .execute()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to insert into monitored_tokens: {}", e))?;
-
-    // Then update if it exists
     client
         .query(
             "ALTER TABLE monitored_tokens 
@@ -167,8 +252,7 @@ pub async fn insert_distribution_metrics(
         )
         .bind(mint_address)
         .execute()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to update monitored_tokens: {}", e))?;
+        .await?;
 
     Ok(())
 }

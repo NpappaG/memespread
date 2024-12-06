@@ -41,4 +41,4 @@ metadata/
 preprocessed_configs/
 tmp/
 user_defined/
-workload/
+workload/metadata_dropped/
