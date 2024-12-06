@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use governor::{Quota, RateLimiter};
 use nonzero_ext::nonzero;
 use solana_sdk::commitment_config::CommitmentConfig;
+use clickhouse::Client;
 
 mod types;
 mod services;
@@ -15,6 +16,7 @@ mod api;
 mod db;
 
 use crate::api::routes::create_router;
+use crate::services::monitor;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +39,7 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!("Failed to connect to RPC: {:?}", e),
     };
     
-    let state = (rpc_client, rpc_limiter);
+    let state = (rpc_client.clone(), rpc_limiter.clone());
     let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -45,6 +47,20 @@ async fn main() -> Result<()> {
     
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
+
+    let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    let client = Client::default()
+        .with_url(&clickhouse_url)
+        .with_database("default");
+
+    // Initialize database schema
+    if let Err(e) = client.query(db::schema::INIT_SQL).execute().await {
+        tracing::error!("Failed to initialize database schema: {:?}", e);
+        return Err(e.into());
+    }
+
+    // Start the monitoring service
+    monitor::start_monitoring(client, rpc_client, rpc_limiter).await;
 
     Ok(())
 }

@@ -1,40 +1,26 @@
-//// This will contain our SQL schema definitions
-//pub const INIT_SQL: &str = r#"
-//-- Enable TimescaleDB extension
-//CREATE EXTENSION IF NOT EXISTS timescaledb;
+// This will contain our SQL schema definitions
+pub const INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS token_stats (
+    timestamp DateTime,
+    mint_address String,
+    price Float64,
+    supply Float64,
+    market_cap Float64,
+    decimals UInt8,
+    holders UInt32,
+    holder_thresholds String, -- JSON stored as string in ClickHouse
+    concentration_metrics String, -- JSON stored as string in ClickHouse
+    hhi Float64,
+    distribution_score Float64
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (mint_address, timestamp);
 
-//CREATE TABLE IF NOT EXISTS token_stats (
-    //timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    //mint_address TEXT NOT NULL,
-    //price DOUBLE PRECISION NOT NULL,
-    //supply DOUBLE PRECISION NOT NULL,
-    //market_cap DOUBLE PRECISION NOT NULL,
-    //decimals INTEGER NOT NULL,
-    //holder_thresholds JSONB NOT NULL,
-    //concentration_metrics JSONB NOT NULL,
-    //hhi DOUBLE PRECISION NOT NULL,
-    //distribution_score DOUBLE PRECISION NOT NULL,
-    
-    //-- Add constraints for data quality
-    //CONSTRAINT positive_price CHECK (price >= 0),
-    //CONSTRAINT positive_supply CHECK (supply >= 0),
-    //CONSTRAINT positive_market_cap CHECK (market_cap >= 0),
-    //CONSTRAINT valid_distribution_score CHECK (distribution_score >= 0 AND distribution_score <= 100)
-//);
-
-//-- Convert to hypertable with compound partitioning
-//SELECT create_hypertable('token_stats', 'timestamp',
-    //partitioning_column => 'mint_address',
-    //number_partitions => 4,
-    //chunk_time_interval => INTERVAL '1 day',
-    //create_default_indexes => TRUE);
-
-//-- Create indexes for common query patterns
-//CREATE INDEX IF NOT EXISTS idx_token_stats_mint_time 
-    //ON token_stats(mint_address, timestamp DESC);
-
-//-- Add compression policy (optional)
-//-- SELECT add_compression_policy('token_stats', INTERVAL '7 days');
-
-//COMMENT ON TABLE token_stats IS 'Time-series token statistics and metrics';
-//"#;
+CREATE TABLE IF NOT EXISTS monitored_tokens (
+    mint_address String,
+    last_stats_update DateTime,
+    last_metrics_update DateTime,
+    created_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree()
+ORDER BY mint_address;
+"#;

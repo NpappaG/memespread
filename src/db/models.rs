@@ -1,18 +1,18 @@
-//use sqlx::FromRow;
-//use chrono::{DateTime, Utc};
-use sqlx::types::Json;
-use crate::types::{HolderThreshold, ConcentrationMetric};
+use chrono::{DateTime, Utc};
+use serde::{Serialize, Deserialize};
+use crate::types::models::{HolderThreshold, ConcentrationMetric};
 
-#[derive(FromRow)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenStatsRecord {
-    pub id: i64,
     pub mint_address: String,
     pub timestamp: DateTime<Utc>,
     pub price: f64,
     pub supply: f64,
     pub market_cap: f64,
-    pub decimals: i32,
-    pub holders: i32,
-    pub holder_thresholds: Json<Vec<HolderThreshold>>,
-    pub concentration_metrics: Json<Vec<ConcentrationMetric>>,
+    pub decimals: u8,
+    pub holders: u32,
+    pub holder_thresholds: Vec<HolderThreshold>,
+    pub concentration_metrics: Vec<ConcentrationMetric>,
+    pub hhi: f64,
+    pub distribution_score: f64,
 }

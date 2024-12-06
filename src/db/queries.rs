@@ -1,97 +1,38 @@
-//use sqlx::PgPool;
-//use anyhow::Result;
-//use crate::types::{TokenHolderStats, HistoricalStats};
+use clickhouse::Client;
+use anyhow::Result;
 
-//pub async fn insert_token_stats(
-    //pool: &PgPool,
-    //mint_address: &str,
-    //stats: &TokenHolderStats,
-//) -> Result<()> {
-    //sqlx::query!(
-        //r#"
-        //INSERT INTO token_stats 
-            //(mint_address, timestamp, price, supply, market_cap, decimals, 
-             //holder_thresholds, concentration_metrics, hhi, distribution_score)
-        //VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8, $9)
-        //"#,
-        //mint_address,
-        //stats.price,
-        //stats.supply,
-        //stats.market_cap,
-        //stats.decimals as i32,
-        //sqlx::types::Json(&stats.holder_thresholds) as _,
-        //sqlx::types::Json(&stats.concentration_metrics) as _,
-        //stats.hhi,
-        //stats.distribution_score,
-    //)
-    //.execute(pool)
-    //.await?;
+#[allow(dead_code)]
+pub async fn get_tokens_needing_stats_update(client: &Client) -> Result<Vec<String>> {
+    let query = "
+        SELECT mint_address 
+        FROM monitored_tokens 
+        WHERE last_stats_update < now() - INTERVAL 1 HOUR
+    ";
+    
+    let mut cursor = client.query(query).fetch::<String>()?;
+    let mut results = Vec::new();
+    
+    while let Some(row) = cursor.next().await? {
+        results.push(row);
+    }
+    
+    Ok(results)
+}
 
-    //Ok(())
-//}
-
-//pub async fn get_token_history(
-    //pool: &PgPool,
-    //mint_address: &str,
-    //days: i32,
-//) -> Result<Vec<HistoricalStats>> {
-    //let rows = sqlx::query!(
-        //r#"
-        //SELECT 
-            //timestamp,
-            //price,
-            //supply,
-            //market_cap,
-            //decimals,
-            //holder_thresholds as "holder_thresholds!: Json<Vec<_>>",
-            //concentration_metrics as "concentration_metrics!: Json<Vec<_>>",
-            //hhi,
-            //distribution_score
-        //FROM token_stats
-        //WHERE mint_address = $1
-          //AND timestamp > NOW() - ($2 || ' days')::INTERVAL
-        //ORDER BY timestamp DESC
-        //"#,
-        //mint_address,
-        //days
-    //)
-    //.fetch_all(pool)
-    //.await?;
-
-    //let history = rows.into_iter()
-        //.map(|row| HistoricalStats {
-            //timestamp: row.timestamp,
-            //stats: TokenHolderStats {
-                //price: row.price,
-                //supply: row.supply,
-                //market_cap: row.market_cap,
-                //decimals: row.decimals as u8,
-                //holder_thresholds: row.holder_thresholds.0,
-                //concentration_metrics: row.concentration_metrics.0,
-                //hhi: row.hhi,
-                //distribution_score: row.distribution_score,
-            //}
-        //})
-        //.collect();
-
-    //Ok(history)
-//}
-
-//pub async fn is_token_monitored(
-    //pool: &PgPool,
-    //mint_address: &str,
-//) -> Result<bool> {
-    //let result = sqlx::query!(
-        //r#"
-        //SELECT EXISTS(
-            //SELECT 1 FROM token_stats 
-            //WHERE mint_address = $1
-        //) as "exists!"
-        //"#,
-        //mint_address
-    //)
-    //.fetch_one(pool)
-    //.await?;
-
-    //Ok(result.exists)
-//}
+#[allow(dead_code)]
+pub async fn get_tokens_needing_metrics_update(client: &Client) -> Result<Vec<String>> {
+    let query = "
+        SELECT mint_address 
+        FROM monitored_tokens 
+        WHERE last_metrics_update < now() - INTERVAL 24 HOUR
+    ";
+    
+    let mut cursor = client.query(query).fetch::<String>()?;
+    let mut results = Vec::new();
+    
+    while let Some(row) = cursor.next().await? {
+        results.push(row);
+    }
+    
+    Ok(results)
+}
