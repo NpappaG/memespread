@@ -1,22 +1,103 @@
-//use std::sync::Arc;
-//use solana_client::nonblocking::rpc_client::RpcClient;
-//use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
-//use crate::services::token::calculate_token_stats;
+use clickhouse::Client;
+use std::sync::Arc;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
+use crate::services::token::{get_token_holders, update_token_metrics};
+use crate::db::operations::insert_token_stats;
+use crate::db::queries::{get_tokens_needing_stats_update, get_tokens_needing_metrics_update};
+use tokio::time::Duration;
+use futures::stream::StreamExt;
 
-//pub async fn monitor_token(
-    //rpc_client: Arc<RpcClient>,
-    //rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-    //mint_address: String
-//) {
-    //loop {
-        //match calculate_token_stats(&rpc_client, &rate_limiter, &mint_address).await {
-            //Ok(stats) => {
-                //tracing::info!("Token stats: {:?}", stats);
-            //}
-            //Err(e) => {
-                //tracing::error!("Failed to get token stats: {}", e);
-            //}
-        //}
-        //tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-    //}
-//}
+pub async fn start_monitoring(
+    db: Client,
+    client: Arc<RpcClient>,
+    rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+) {
+    tracing::info!("Starting monitoring service...");
+    let stats_interval = Duration::from_secs(60);
+    let metrics_interval = Duration::from_secs(14400);
+    let mut stats_timer = tokio::time::interval(stats_interval);
+    let mut metrics_timer = tokio::time::interval(metrics_interval);
+    
+    // Configure batch sizes - more conservative
+    let batch_size = 5;  // Reduced from 10
+    let max_concurrent_batches = 2;  // Reduced from 5
+
+    loop {
+        tokio::select! {
+            _ = stats_timer.tick() => {
+                tracing::info!("Starting stats monitoring cycle...");
+                if let Ok(tokens) = get_tokens_needing_stats_update(&db).await {
+                    for token_batch in tokens.chunks(batch_size) {
+                        let futures: Vec<_> = token_batch.iter().map(|token| {
+                            let client = client.clone();
+                            let rate_limiter = rate_limiter.clone();
+                            let db = db.clone();
+                            let token = token.clone();
+                            
+                            async move {
+                                // Add delay between batch items
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                rate_limiter.until_ready().await;
+                                
+                                match get_token_holders(&client, &rate_limiter, &token, 0.0, &db).await {
+                                    Ok(stats) => {
+                                        if let Err(e) = insert_token_stats(&db, &token, &stats).await {
+                                            tracing::error!("Failed to insert stats for {}: {:?}", token, e);
+                                        } else {
+                                            tracing::info!("Successfully updated stats for {}", token);
+                                        }
+                                    }
+                                    Err(e) => tracing::error!("Failed to get token holders for {}: {:?}", token, e),
+                                }
+                            }
+                        }).collect();
+
+                        // Process batch with controlled concurrency
+                        futures::stream::iter(futures)
+                            .buffer_unordered(max_concurrent_batches)
+                            .collect::<Vec<_>>()
+                            .await;
+                        
+                        // Add delay between batches
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+
+            _ = metrics_timer.tick() => {
+                tracing::info!("Starting metrics monitoring cycle...");
+                if let Ok(tokens) = get_tokens_needing_metrics_update(&db).await {
+                    for token_batch in tokens.chunks(batch_size) {
+                        let futures: Vec<_> = token_batch.iter().map(|token| {
+                            let client = client.clone();
+                            let rate_limiter = rate_limiter.clone();
+                            let db = db.clone();
+                            let token = token.clone();
+                            
+                            async move {
+                                // Add delay between batch items
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                rate_limiter.until_ready().await;
+                                
+                                if let Err(e) = update_token_metrics(&client, &rate_limiter, &token, &db).await {
+                                    tracing::error!("Failed to update metrics for {}: {:?}", token, e);
+                                } else {
+                                    tracing::info!("Successfully updated metrics for {}", token);
+                                }
+                            }
+                        }).collect();
+
+                        futures::stream::iter(futures)
+                            .buffer_unordered(max_concurrent_batches)
+                            .collect::<Vec<_>>()
+                            .await;
+                        
+                        // Add delay between batches
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -8,6 +8,9 @@ use tokio::net::TcpListener;
 use governor::{Quota, RateLimiter};
 use nonzero_ext::nonzero;
 use solana_sdk::commitment_config::CommitmentConfig;
+use clickhouse::Client;
+use crate::db::init::init_database;
+use tokio::time::{sleep, Duration};
 
 mod types;
 mod services;
@@ -15,6 +18,31 @@ mod api;
 mod db;
 
 use crate::api::routes::create_router;
+use crate::services::monitor;
+
+async fn connect_to_clickhouse(max_retries: u32) -> Result<Client> {
+    let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    let client = Client::default()
+        .with_url(&clickhouse_url)
+        .with_database("default");
+
+    for attempt in 1..=max_retries {
+        match client.query("SELECT 1").execute().await {
+            Ok(_) => {
+                tracing::info!("Connected to ClickHouse at {}", clickhouse_url);
+                return Ok(client);
+            }
+            Err(e) => {
+                if attempt == max_retries {
+                    return Err(anyhow::anyhow!("Failed to connect to ClickHouse after {} attempts: {}", max_retries, e));
+                }
+                tracing::warn!("Failed to connect to ClickHouse (attempt {}/{}): {}", attempt, max_retries, e);
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    unreachable!()
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,14 +65,42 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!("Failed to connect to RPC: {:?}", e),
     };
     
-    let state = (rpc_client, rpc_limiter);
+    // Connect to ClickHouse with retries
+    let client = connect_to_clickhouse(5).await?;
+
+    // Initialize database tables
+    init_database(&client).await?;
+
+    let state = (rpc_client.clone(), rpc_limiter.clone(), client.clone());
     let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("Listening on {}", addr);
     
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
+
+    // Start the monitoring service in a separate task
+    let monitor_handle = tokio::spawn({
+        let client = client.clone();
+        let rpc_client = rpc_client.clone();
+        let rate_limiter = rpc_limiter.clone();
+        async move {
+            tracing::info!("Starting monitoring service...");
+            monitor::start_monitoring(client, rpc_client, rate_limiter).await;
+        }
+    });
+
+    // Run both the API server and monitoring service concurrently
+    tokio::select! {
+        result = axum::serve(listener, app.into_make_service()) => {
+            if let Err(e) = result {
+                tracing::error!("Failed to serve API: {:?}", e);
+            }
+        }
+        _ = monitor_handle => {
+            tracing::info!("Monitoring service finished");
+        }
+    }
 
     Ok(())
 }
