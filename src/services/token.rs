@@ -177,7 +177,7 @@ pub async fn get_token_holders(
     rate_limiter: &Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     mint_address: &str,
     price_in_usd: f64,
-    clickhouse_client: &Client,
+    _clickhouse_client: &Client,
 ) -> Result<TokenHolderStats, anyhow::Error> {
     rate_limiter.until_ready().await;
     let mint_pubkey = Pubkey::from_str(mint_address)?;
@@ -207,25 +207,8 @@ pub async fn get_token_holders(
         .map(|(pubkey, amount, _)| (pubkey, amount))
         .collect();
 
-    // Calculate other metrics while distribution metrics are being computed
+    // Calculate other metrics
     let result = calculate_holder_stats(&final_holders, &mint_data, price);
-    
-    // Instead of awaiting, spawn the task and return immediately
-    let holders_for_distro = final_holders.clone();
-    let supply_for_distro = mint_data.supply;
-    let mint_address_clone = mint_address.to_string();
-    let clickhouse_client_clone = clickhouse_client.clone();
-    tokio::spawn(async move {
-        let distro_start = std::time::Instant::now();
-        let (hhi, distribution_score) = calculate_distribution_metrics_async(holders_for_distro, supply_for_distro).await;
-        let distro_duration = distro_start.elapsed();
-        info!("Distribution metrics calculation took: {:?}", distro_duration);
-        
-        if let Err(e) = insert_distribution_metrics(&clickhouse_client_clone, &mint_address_clone, hhi, distribution_score).await {
-            tracing::error!("Failed to save distribution metrics: {:?}", e);
-        }
-    });
-
     Ok(result)
 }
 
@@ -337,6 +320,7 @@ fn calculate_holder_stats(
         market_cap,
         decimals,
         holders: total_holders,
+        raw_holders: Some(holders.to_vec()),
         holder_thresholds,
         concentration_metrics,
         hhi: 0.0,
@@ -396,4 +380,24 @@ fn calculate_distribution_score(holders: &[(String, u64)], total_supply: u64) ->
     let distribution_score = (1.0 - gini) * 100.0;
 
     distribution_score.clamp(0.0, 100.0)
+}
+
+pub async fn update_token_metrics(
+    client: &Arc<RpcClient>,
+    rate_limiter: &Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    mint_address: &str,
+    clickhouse_client: &Client,
+) -> Result<(), anyhow::Error> {
+    let stats = get_token_holders(client, rate_limiter, mint_address, 0.0, clickhouse_client).await?;
+    
+    // Get raw supply from mint data
+    let mint_pubkey = Pubkey::from_str(mint_address)?;
+    let mint_account = client.get_account(&mint_pubkey).await?;
+    let mint_data = spl_token::state::Mint::unpack(&mint_account.data)?;
+    
+    let (hhi, distribution_score) = calculate_distribution_metrics_async(stats.raw_holders.unwrap(), mint_data.supply).await;
+    
+    insert_distribution_metrics(clickhouse_client, mint_address, hhi, distribution_score).await?;
+    
+    Ok(())
 }

@@ -8,8 +8,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
-    #[error("RPC error: {0}")]
-    RpcError(String),
     #[error("Database error: {0}")]
     DatabaseError(String),
 }
@@ -23,7 +21,6 @@ struct ErrorResponse {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            ApiError::RpcError(_) => StatusCode::BAD_GATEWAY,
             ApiError::DatabaseError(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
 

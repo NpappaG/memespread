@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clickhouse::Client;
 use crate::types::models::TokenHolderStats;
-use crate::db::models::{TokenStatsRecord, TokenHolderThresholdRecord, TokenConcentrationMetricRecord};
+use crate::db::models::{TokenStatsRecord, TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenDistributionMetricRecord};
 
 pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &TokenHolderStats) -> Result<()> {
     // Insert base stats
@@ -9,12 +9,13 @@ pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &Tok
         .query(
             "INSERT INTO token_stats (
                 mint_address,
+                timestamp,
                 price,
                 supply,
                 market_cap,
                 decimals,
                 holders
-            ) VALUES (?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, toDateTime(now(), 'UTC'), ?, ?, ?, ?, ?)"
         )
         .bind(mint_address)
         .bind(stats.price)
@@ -69,37 +70,46 @@ pub async fn insert_token_stats(client: &Client, mint_address: &str, stats: &Tok
 }
 
 pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Result<Option<TokenHolderStats>> {
-    // Get base stats
+    tracing::debug!("Starting get_latest_token_stats for {}", mint_address);
+    
+    let query = "SELECT 
+        mint_address,
+        timestamp,
+        price,
+        supply,
+        market_cap,
+        decimals,
+        holders
+    FROM token_stats 
+    WHERE mint_address = ?
+    ORDER BY timestamp DESC 
+    LIMIT 1";
+    
+    tracing::debug!("Executing query: {}", query);
+    
     let base_stats = client
-        .query(
-            "SELECT 
-                mint_address,
-                timestamp,
-                price,
-                supply,
-                market_cap,
-                decimals,
-                holders
-            FROM token_stats 
-            WHERE mint_address = ?
-            ORDER BY timestamp DESC
-            LIMIT 1"
-        )
+        .query(query)
         .bind(mint_address)
-        .fetch_one::<TokenStatsRecord>()
-        .await;
-
-    let base_stats = match base_stats {
-        Ok(stats) => stats,
-        Err(clickhouse::error::Error::RowNotFound) => return Ok(None),
-        Err(e) => return Err(anyhow::anyhow!(e)),
+        .fetch_all::<TokenStatsRecord>()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch base stats: {:?}", e);
+            e
+        })?;
+        
+    let base_stats = match base_stats.first() {
+        Some(stats) => stats,
+        None => return Ok(None),
     };
 
+    tracing::debug!("Received base stats: {:?}", base_stats);
+
+    tracing::debug!("Fetching holder thresholds");
     // Get holder thresholds
     let holder_thresholds = client
         .query(
             "SELECT 
-                mint_address,
+                toString(mint_address) as mint_address,
                 timestamp,
                 usd_threshold,
                 holder_count,
@@ -107,29 +117,29 @@ pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Resu
                 percentage_of_10
             FROM token_holder_thresholds
             WHERE mint_address = ?
-            AND timestamp = ?
-            ORDER BY usd_threshold"
+            ORDER BY timestamp DESC, usd_threshold
+            LIMIT 6"
         )
         .bind(mint_address)
-        .bind(base_stats.timestamp)
         .fetch_all::<TokenHolderThresholdRecord>()
         .await?;
 
-    // Get concentration metrics
+    tracing::debug!("Found {} holder thresholds", holder_thresholds.len());
+
+    // Get concentration metrics - removed timestamp constraint
     let concentration_metrics = client
         .query(
             "SELECT 
-                mint_address,
+                toString(mint_address) as mint_address,
                 timestamp,
                 top_n,
                 percentage
             FROM token_concentration_metrics
             WHERE mint_address = ?
-            AND timestamp = ?
-            ORDER BY top_n"
+            ORDER BY timestamp DESC, top_n
+            LIMIT 6"
         )
         .bind(mint_address)
-        .bind(base_stats.timestamp)
         .fetch_all::<TokenConcentrationMetricRecord>()
         .await?;
 
@@ -137,6 +147,8 @@ pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Resu
     let distribution = client
         .query(
             "SELECT 
+                toString(mint_address) as mint_address,
+                timestamp,
                 hhi,
                 distribution_score
             FROM token_distribution_metrics
@@ -145,12 +157,15 @@ pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Resu
             LIMIT 1"
         )
         .bind(mint_address)
-        .fetch_one::<(f64, f64)>()
+        .fetch_one::<TokenDistributionMetricRecord>()
         .await;
 
     let (hhi, distribution_score) = match distribution {
-        Ok((h, d)) => (h, d),
-        Err(_) => (0.0, 0.0),
+        Ok(record) => (record.hhi, record.distribution_score),
+        Err(e) => {
+            tracing::error!("Error fetching distribution metrics: {}", e);
+            (0.0, 0.0)
+        }
     };
 
     // Convert to TokenHolderStats
@@ -160,6 +175,7 @@ pub async fn get_latest_token_stats(client: &Client, mint_address: &str) -> Resu
         market_cap: base_stats.market_cap,
         decimals: base_stats.decimals,
         holders: base_stats.holders as usize,
+        raw_holders: None,
         holder_thresholds: holder_thresholds.into_iter().map(|h| crate::types::models::HolderThreshold {
             usd_threshold: h.usd_threshold,
             count: h.holder_count as i32,
@@ -255,4 +271,30 @@ pub async fn insert_distribution_metrics(
         .await?;
 
     Ok(())
+}
+
+pub fn structure_token_stats(data: TokenHolderStats) -> serde_json::Value {
+    serde_json::json!({
+        "concentration_metrics": data.concentration_metrics.iter().map(|m| {
+            serde_json::json!({
+                "top_n": m.top_n,
+                "percentage": (m.percentage * 10000.0).round() / 10000.0
+            })
+        }).collect::<Vec<_>>(),
+        "holder_thresholds": data.holder_thresholds.iter().map(|h| {
+            serde_json::json!({
+                "usd_threshold": h.usd_threshold,
+                "count": h.count,
+                "percentage": (h.percentage * 10000.0).round() / 10000.0,
+                "percentage_of_10": (h.percentage_of_10 * 10000.0).round() / 10000.0
+            })
+        }).collect::<Vec<_>>(),
+        "decimals": data.decimals,
+        "distribution_score": (data.distribution_score * 10000.0).round() / 10000.0,
+        "hhi": (data.hhi * 10000.0).round() / 10000.0,
+        "holders": data.holders,
+        "market_cap": (data.market_cap * 100.0).round() / 100.0,
+        "price": (data.price * 1000000000.0).round() / 1000000000.0,
+        "supply": (data.supply * 100.0).round() / 100.0
+    })
 }

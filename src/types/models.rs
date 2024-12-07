@@ -13,6 +13,8 @@ pub struct TokenHolderStats {
     pub market_cap: f64,
     pub decimals: u8,
     pub holders: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_holders: Option<Vec<(String, u64)>>,
     pub holder_thresholds: Vec<HolderThreshold>,
     pub concentration_metrics: Vec<ConcentrationMetric>,
     pub hhi: f64,
