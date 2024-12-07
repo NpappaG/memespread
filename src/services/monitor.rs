@@ -22,42 +22,36 @@ pub async fn start_monitoring(
         tokio::select! {
             _ = stats_timer.tick() => {
                 tracing::info!("Starting stats monitoring cycle...");
-                match get_tokens_needing_stats_update(&db).await {
-                    Ok(tokens) => {
-                        tracing::info!("Found {} tokens needing stats update", tokens.len());
-                        for mint_address in tokens {
-                            tracing::info!("Processing token: {}", mint_address);
-                            match get_token_holders(&client, &rate_limiter, &mint_address, 0.0, &db).await {
-                                Ok(stats) => {
-                                    match insert_token_stats(&db, &mint_address, &stats).await {
-                                        Ok(_) => tracing::info!("Successfully updated stats for {}", mint_address),
-                                        Err(e) => tracing::error!("Failed to insert stats for {}: {:?}", mint_address, e),
-                                    }
+                if let Ok(tokens) = get_tokens_needing_stats_update(&db).await {
+                    for token in tokens {
+                        rate_limiter.until_ready().await;
+                        tracing::info!("Processing token: {}", token);
+                        match get_token_holders(&client, &rate_limiter, &token, 0.0, &db).await {
+                            Ok(stats) => {
+                                match insert_token_stats(&db, &token, &stats).await {
+                                    Ok(_) => tracing::info!("Successfully updated stats for {}", token),
+                                    Err(e) => tracing::error!("Failed to insert stats for {}: {:?}", token, e),
                                 }
-                                Err(e) => tracing::error!("Failed to get token holders for {}: {:?}", mint_address, e),
                             }
-                            // Add small delay between tokens to avoid overwhelming the system
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Err(e) => tracing::error!("Failed to get token holders for {}: {:?}", token, e),
                         }
+                        // Add small delay between tokens to avoid overwhelming the system
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    Err(e) => tracing::error!("Failed to get tokens needing update: {:?}", e),
                 }
             }
 
             _ = metrics_timer.tick() => {
                 tracing::info!("Starting metrics monitoring cycle...");
-                match get_tokens_needing_metrics_update(&db).await {
-                    Ok(tokens) => {
-                        tracing::info!("Found {} tokens needing metrics update", tokens.len());
-                        for mint_address in tokens {
-                            tracing::debug!("Updating metrics for token: {}", mint_address);
-                            match update_token_metrics(&client, &rate_limiter, &mint_address, &db).await {
-                                Ok(_) => tracing::info!("Successfully updated metrics for {}", mint_address),
-                                Err(e) => tracing::error!("Failed to update metrics for {}: {:?}", mint_address, e),
-                            }
+                if let Ok(tokens) = get_tokens_needing_metrics_update(&db).await {
+                    for token in tokens {
+                        rate_limiter.until_ready().await;
+                        tracing::debug!("Updating metrics for token: {}", token);
+                        match update_token_metrics(&client, &rate_limiter, &token, &db).await {
+                            Ok(_) => tracing::info!("Successfully updated metrics for {}", token),
+                            Err(e) => tracing::error!("Failed to update metrics for {}: {:?}", token, e),
                         }
                     }
-                    Err(e) => tracing::error!("Failed to get tokens needing metrics update: {:?}", e),
                 }
             }
         }

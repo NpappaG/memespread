@@ -69,6 +69,7 @@ async fn fetch_and_sort_holders(
 
 async fn identify_program_owned_accounts(
     client: &Arc<RpcClient>,
+    rate_limiter: &Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     holders: &[(String, u64, Pubkey)],
     mint_supply: u64,
     market_cap: f64,
@@ -123,7 +124,10 @@ async fn identify_program_owned_accounts(
                 let pubkeys = chunk.iter()
                     .map(|(owner, _)| *owner)
                     .collect::<Vec<Pubkey>>();
+                let rate_limiter = rate_limiter.clone();
+                
                 async move {
+                    rate_limiter.until_ready().await;  // Rate limit each chunk's RPC call
                     client.get_multiple_accounts(&pubkeys).await
                 }
             })
@@ -201,7 +205,7 @@ pub async fn get_token_holders(
     let (holders, _) = fetch_and_sort_holders(client, &mint_pubkey, min_balance).await?;
     
     // Use only the holders vector for identify_program_owned_accounts
-    let program_owned = identify_program_owned_accounts(client, &holders, mint_data.supply, market_cap).await?;
+    let program_owned = identify_program_owned_accounts(client, rate_limiter, &holders, mint_data.supply, market_cap).await?;
     let final_holders: Vec<(String, u64)> = holders.into_iter()
         .filter(|(_, _, owner)| !program_owned.contains(owner))
         .map(|(pubkey, amount, _)| (pubkey, amount))
