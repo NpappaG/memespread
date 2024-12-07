@@ -21,6 +21,7 @@ use super::excluded_accounts::{PROGRAM_IDS, EXCLUDED_OWNERS};
 use crate::db::operations::insert_distribution_metrics;
 use tracing::info;
 use clickhouse::Client;
+use std::time::Duration;
 
 async fn fetch_and_sort_holders(
     client: &Arc<RpcClient>,
@@ -117,8 +118,8 @@ async fn identify_program_owned_accounts(
         }
     }
 
-    // Then check for program-owned accounts
-    for (batch_num, chunks) in large_holders.chunks(chunk_size * 4).enumerate() {
+    // Process accounts in smaller batches with rate limiting
+    for (batch_num, chunks) in large_holders.chunks(chunk_size * 2).enumerate() {
         let futures: Vec<_> = chunks.chunks(chunk_size)
             .map(|chunk| {
                 let pubkeys = chunk.iter()
@@ -127,7 +128,9 @@ async fn identify_program_owned_accounts(
                 let rate_limiter = rate_limiter.clone();
                 
                 async move {
-                    rate_limiter.until_ready().await;  // Rate limit each chunk's RPC call
+                    // Wait for rate limiter before each RPC call
+                    rate_limiter.until_ready().await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                     client.get_multiple_accounts(&pubkeys).await
                 }
             })
