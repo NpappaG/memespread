@@ -8,25 +8,23 @@ pub struct TokenQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenHolderStats {
+    pub mint_address: String,
     pub price: f64,
     pub supply: f64,
     pub market_cap: f64,
     pub decimals: u8,
-    pub holders: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_holders: Option<Vec<(String, u64)>>,
+    pub total_count: usize,
     pub holder_thresholds: Vec<HolderThreshold>,
     pub concentration_metrics: Vec<ConcentrationMetric>,
     pub hhi: f64,
-    pub distribution_score: f64,
+    pub distribution_score: f64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HolderThreshold {
     pub usd_threshold: f64,
-    pub count: i32,
-    pub percentage: f64,
-    pub percentage_of_10: f64,
+    pub count: u64,
+    pub percentage: f64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

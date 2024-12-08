@@ -90,6 +90,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Start the excluded accounts service in a separate task
+    let excluded_accounts_handle = tokio::spawn({
+        let rpc = rpc_client.clone();
+        let rate_limiter = rpc_limiter.clone();
+        let ch_client = client.clone();
+        async move {
+            tracing::info!("Starting excluded accounts service...");
+            services::excluded_accounts::schedule_exclusion_updates(
+                rpc,
+                rate_limiter,
+                ch_client,
+            ).await;
+        }
+    });
+
     // Run both the API server and monitoring service concurrently
     tokio::select! {
         result = axum::serve(listener, app.into_make_service()) => {
@@ -99,6 +114,9 @@ async fn main() -> Result<()> {
         }
         _ = monitor_handle => {
             tracing::info!("Monitoring service finished");
+        }
+        _ = excluded_accounts_handle => {
+            tracing::info!("Excluded accounts service finished");
         }
     }
 
