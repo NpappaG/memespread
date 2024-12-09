@@ -65,24 +65,13 @@ pub async fn init_database(client: &Client) -> Result<()> {
     for (name, sql) in mv_configs {
         match client.query(sql).execute().await {
             Ok(_) => {
-                // Verify MV exists
-                let status = client
-                    .query("SELECT engine FROM system.tables WHERE name = ?")
-                    .bind(name)
-                    .fetch_one::<String>()
-                    .await;
-                
-                match status {
-                    Ok(engine) => {
-                        tracing::info!("Created MV {} (engine: {})", name, engine);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to verify MV {}: {}", name, e);
-                        return Err(e.into());
-                    }
-                }
+                tracing::info!("Created or verified MV {}", name);
             }
             Err(e) => {
+                if e.to_string().contains("already exists") {
+                    tracing::info!("MV {} already exists, skipping", name);
+                    continue;
+                }
                 tracing::error!("Failed to create MV {}: {}", name, e);
                 return Err(e.into());
             }

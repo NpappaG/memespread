@@ -38,38 +38,47 @@ async fn process_stats(stats_running: &mut bool, db: &Client, client: &Arc<RpcCl
     *stats_running = true;
     tracing::info!("Starting stats monitoring cycle...");
     
-    let batch_size = 5;
-    let max_concurrent_batches = 2;
+    let batch_size = 1;
 
-    if let Ok(tokens) = get_tokens_needing_stats_update(&db).await {
-        for token_batch in tokens.chunks(batch_size) {
-            let futures: Vec<_> = token_batch.iter().map(|token| {
-                let client = client.clone();
-                let rate_limiter = rate_limiter.clone();
-                let db = db.clone();
-                let token = token.clone();
-                
-                async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    rate_limiter.until_ready().await;
+    match get_tokens_needing_stats_update(&db).await {
+        Ok(tokens) => {
+            tracing::info!("Found {} tokens needing stats update", tokens.len());
+            for token_batch in tokens.chunks(batch_size) {
+                let futures: Vec<_> = token_batch.iter().map(|token| {
+                    let client = client.clone();
+                    let rate_limiter = rate_limiter.clone();
+                    let db = db.clone();
+                    let token = token.clone();
                     
-                    if let Err(e) = update_token_metrics(&client, &rate_limiter, &token, &db).await {
-                        tracing::error!("Failed to update stats for {}: {:?}", token, e);
-                    } else {
-                        tracing::info!("Successfully updated stats for {}", token);
+                    async move {
+                        tracing::debug!("Processing stats for token {}", token);
+                        rate_limiter.until_ready().await;
+                        
+                        match update_token_metrics(&client, &rate_limiter, &token, &db).await {
+                            Ok(_) => {
+                                if let Err(e) = db.query(
+                                    "ALTER TABLE monitored_tokens UPDATE last_stats_update = now() WHERE mint_address = ?"
+                                )
+                                    .bind(&token)
+                                    .execute()
+                                    .await 
+                                {
+                                    tracing::error!("Failed to update last_stats_update for {}: {:?}", token, e);
+                                } else {
+                                    tracing::info!("Successfully updated stats and timestamp for {}", token);
+                                }
+                            }
+                            Err(e) => tracing::error!("Failed to update stats for {}: {:?}", token, e),
+                        }
                     }
-                }
-            }).collect();
+                }).collect();
 
-            futures::stream::iter(futures)
-                .buffer_unordered(max_concurrent_batches)
-                .collect::<Vec<_>>()
-                .await;
-            
-            tokio::time::sleep(Duration::from_secs(1)).await;
+                futures::future::join_all(futures).await;
+            }
         }
+        Err(e) => tracing::error!("Failed to get tokens needing stats update: {:?}", e),
     }
-    
+
     *stats_running = false;
 }
 

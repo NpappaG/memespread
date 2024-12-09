@@ -3,8 +3,6 @@ use clickhouse::Client;
 use crate::types::models::TokenHolderStats;
 use solana_sdk::pubkey::Pubkey;
 
-use chrono::{DateTime, Utc};
-
 pub async fn insert_token_stats(
     client: &Client,
     mint_address: &str,
@@ -12,8 +10,14 @@ pub async fn insert_token_stats(
     supply: f64,
     market_cap: f64,
     decimals: u8,
-    _timestamp: Option<DateTime<Utc>>,
-) -> Result<String, anyhow::Error> {
+) -> Result<(), anyhow::Error> {
+    // Get the timestamp that was just used
+    let timestamp: String = client
+        .query("SELECT toString(max(timestamp)) FROM token_holders WHERE mint_address = ?")
+        .bind(mint_address)
+        .fetch_one()
+        .await?;
+
     client
         .query(
             "INSERT INTO token_stats (
@@ -23,9 +27,10 @@ pub async fn insert_token_stats(
                 supply,
                 market_cap,
                 decimals
-            ) VALUES (?, now('UTC'), ?, ?, ?, ?)"
+            ) VALUES (?, toDateTime(?, 'UTC'), ?, ?, ?, ?)"
         )
         .bind(mint_address)
+        .bind(&timestamp)
         .bind(price)
         .bind(supply)
         .bind(market_cap)
@@ -33,45 +38,42 @@ pub async fn insert_token_stats(
         .execute()
         .await?;
 
-    let timestamp: String = client
-        .query("SELECT toString(timestamp) FROM token_stats WHERE mint_address = ? ORDER BY timestamp DESC LIMIT 1")
-        .bind(mint_address)
-        .fetch_one()
-        .await?;
+    update_monitored_token_timestamp(client, mint_address, &timestamp).await?;
 
-    Ok(timestamp)
+    Ok(())
 }
 
 pub async fn insert_token_holders(
     client: &Client,
     mint_address: &str,
     holders: &[(String, u64, Pubkey)],
-    timestamp: &str,
 ) -> Result<(), anyhow::Error> {
-    // Create one large values string for all holders
-    let values = holders.iter().enumerate()
-        .map(|(i, _)| {
-            if i == 0 { " (?, ?, ?, ?, ?)" } else { ",(?, ?, ?, ?, ?)" }
-        })
-        .collect::<String>();
+    tracing::info!("Starting to insert {} holders for {}", holders.len(), mint_address);
 
-    let mut query = client.query(&format!(
-        "INSERT INTO token_holders (mint_address, token_account, holder_address, amount, timestamp) VALUES{}",
+    let values = holders.iter()
+        .map(|(token_account, amount, holder_address)| 
+            format!("('{}', '{}', '{}', {}, now())", 
+                mint_address, 
+                token_account, 
+                holder_address.to_string(), 
+                amount
+            )
+        )
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let query = format!(
+        "INSERT INTO token_holders 
+         (mint_address, token_account, holder_address, amount, timestamp) 
+         VALUES {}", 
         values
-    ));
+    );
 
-    // Bind all values in one go
-    for (token_account, amount, holder_address) in holders {
-        query = query
-            .bind(mint_address)
-            .bind(token_account)
-            .bind(holder_address.to_string())
-            .bind(*amount)
-            .bind(timestamp);
-    }
+    client.query(&query)
+        .execute()
+        .await?;
 
-    query.execute().await?;
-
+    tracing::info!("Successfully inserted {} holders", holders.len());
     Ok(())
 }
 

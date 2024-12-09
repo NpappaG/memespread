@@ -18,7 +18,7 @@ use tracing::info;
 use clickhouse::Client;
 use solana_account_decoder::UiAccountEncoding;
 use crate::db::models::{TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenStatsRecord};
-use crate::db::operations::{insert_token_stats, insert_token_holders, update_monitored_token_timestamp};
+use crate::db::operations::{insert_token_stats, insert_token_holders};
 use chrono::{Utc, TimeZone};
 
 
@@ -153,28 +153,30 @@ pub async fn update_token_metrics(
     rate_limiter: &Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     mint_address: &str,
     clickhouse_client: &Client,
-) -> Result<(), anyhow::Error> {
+) -> Result<()> {
+    // Fetch holders first
     let mint_pubkey = Pubkey::from_str(mint_address)?;
     let mint_account = client.get_account(&mint_pubkey).await?;
     let mint_data = spl_token::state::Mint::unpack(&mint_account.data)?;
-    let price = get_token_price(mint_address).await?;
-    let market_cap = price * (mint_data.supply as f64) / 10f64.powi(mint_data.decimals as i32);
 
-    // Insert stats and get ClickHouse timestamp
-    let timestamp = insert_token_stats(
+    let holders = fetch_and_sort_holders(client, rate_limiter, &mint_pubkey, 1).await?;
+    
+    // Insert holders first
+    insert_token_holders(clickhouse_client, mint_address, &holders).await?;
+
+    // Get price and other metrics
+    let price = get_token_price(mint_address).await?;
+    let market_cap = price * mint_data.supply as f64;
+
+    // Insert stats (it will use the timestamp from holders)
+    insert_token_stats(
         clickhouse_client,
         mint_address,
         price,
         mint_data.supply as f64,
         market_cap,
         mint_data.decimals as u8,
-        None,
     ).await?;
 
-    // Use the same timestamp for holders
-    let holders = fetch_and_sort_holders(client, rate_limiter, &mint_pubkey, 1).await?;
-    insert_token_holders(clickhouse_client, mint_address, &holders, &timestamp).await?;
-    
-    update_monitored_token_timestamp(clickhouse_client, mint_address, &timestamp).await?;
     Ok(())
 }
