@@ -20,17 +20,19 @@ CREATE TABLE IF NOT EXISTS token_stats (
 ) ENGINE = ReplacingMergeTree
 "#;
 
+// Raw holder data from every rpc call
 pub const TOKEN_HOLDERS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS token_holders (
     mint_address String,
     token_account String,
     holder_address String,
     amount UInt64,
-    timestamp DateTime('UTC') DEFAULT now('UTC'),
+    timestamp DateTime('UTC'),
     PRIMARY KEY (mint_address, holder_address, timestamp)
 ) ENGINE = ReplacingMergeTree
 "#;
 
+//accumulated exclusions list checked every 24 hrs
 pub const EXCLUDED_ACCOUNTS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS excluded_accounts (
     address String,
@@ -42,6 +44,7 @@ CREATE TABLE IF NOT EXISTS excluded_accounts (
 "#;
 
 // Target tables for MVs
+//this is the cleaned up holder data - removing the exclusions
 pub const TOKEN_HOLDER_BALANCES_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS token_holder_balances (
     mint_address String,
@@ -51,6 +54,18 @@ CREATE TABLE IF NOT EXISTS token_holder_balances (
     PRIMARY KEY (mint_address, holder_address)
 ) ENGINE = ReplacingMergeTree
 "#;
+
+
+pub const TOKEN_THRESHOLDS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS token_thresholds (
+    mint_address String,
+    usd_threshold Float64,
+    token_amount Float64,
+    timestamp DateTime('UTC'),
+    PRIMARY KEY (mint_address, usd_threshold, timestamp)
+) ENGINE = ReplacingMergeTree
+"#;
+
 
 pub const TOKEN_HOLDER_COUNTS_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS token_holder_counts (
@@ -77,7 +92,9 @@ CREATE TABLE IF NOT EXISTS token_distribution (
     mint_address String,
     timestamp DateTime('UTC'),
     hhi Float64,
-    denominator UInt64,
+    hhi_10usd Float64,
+    distribution_score Float64,
+    distribution_score_10usd Float64,
     PRIMARY KEY (mint_address, timestamp)
 ) ENGINE = ReplacingMergeTree
 "#;
@@ -89,60 +106,96 @@ TO token_holder_balances
 AS SELECT
     th.mint_address,
     th.holder_address,
-    toFloat64(sum(th.amount)) as balance
+    toFloat64(sum(th.amount)) as balance,
+    th.timestamp
 FROM token_holders th
-LEFT JOIN excluded_accounts ea ON ea.address = th.holder_address
-WHERE ea.address IS NULL
-GROUP BY th.mint_address, th.holder_address
+LEFT ANTI JOIN excluded_accounts ea ON th.holder_address = ea.address
+GROUP BY th.mint_address, th.holder_address, th.timestamp
 "#;
 
-pub const TOKEN_HOLDER_COUNTS_MV_SQL: &str = r#"
-CREATE MATERIALIZED VIEW IF NOT EXISTS token_holder_counts_mv
-TO token_holder_counts
-AS SELECT 
-    thb.mint_address,
-    ts.timestamp,
-    mv.threshold as usd_threshold,
-    uniqState(thb.holder_address) as holder_count
-FROM (
-    SELECT 
-        mint_address,
-        holder_address,
-        sumMerge(total_amount) as balance
-    FROM token_holder_balances_mv
-    GROUP BY mint_address, holder_address
-) thb
-CROSS JOIN (
-    SELECT 0 AS threshold
-    UNION ALL SELECT 10
+pub const TOKEN_THRESHOLDS_MV_SQL: &str = r#"
+CREATE MATERIALIZED VIEW IF NOT EXISTS token_thresholds_mv
+TO token_thresholds
+AS 
+WITH thresholds AS (
+    SELECT 10 as usd_threshold
     UNION ALL SELECT 100
     UNION ALL SELECT 1000
     UNION ALL SELECT 10000
     UNION ALL SELECT 100000
-    UNION ALL SELECT 1000000
-) mv
-JOIN token_stats ts ON thb.mint_address = ts.mint_address
-WHERE thb.balance * ts.price >= mv.threshold
-GROUP BY thb.mint_address, ts.timestamp, mv.threshold
+)
+SELECT 
+    ts.mint_address,
+    thresholds.usd_threshold,
+    thresholds.usd_threshold / ts.price as token_amount,
+    ts.timestamp
+FROM token_stats ts
+CROSS JOIN thresholds
+WHERE ts.price > 0
+GROUP BY ts.mint_address, thresholds.usd_threshold, ts.timestamp, ts.price
+"#;
+
+
+pub const TOKEN_HOLDER_COUNTS_MV_SQL: &str = r#"
+CREATE MATERIALIZED VIEW IF NOT EXISTS token_holder_counts_mv
+TO token_holder_counts
+AS 
+WITH thresholds AS (
+    SELECT 10 as usd_threshold
+    UNION ALL SELECT 100
+    UNION ALL SELECT 1000
+    UNION ALL SELECT 10000
+    UNION ALL SELECT 100000
+),
+holder_counts AS (
+    SELECT 
+        thb.mint_address as mint_address,
+        thb.timestamp as timestamp,
+        thresholds.usd_threshold as usd_threshold,
+        thb.holder_address as holder_address,
+        thb.balance as balance,
+        tt.token_amount as min_tokens_needed,
+        ts.decimals as decimals
+    FROM token_holder_balances thb
+    CROSS JOIN thresholds
+    JOIN token_thresholds tt 
+        ON thb.mint_address = tt.mint_address 
+        AND thb.timestamp = tt.timestamp
+        AND tt.usd_threshold = thresholds.usd_threshold
+    JOIN token_stats ts
+        ON thb.mint_address = ts.mint_address
+        AND thb.timestamp = ts.timestamp
+)
+SELECT 
+    holder_counts.mint_address,
+    holder_counts.timestamp,
+    holder_counts.usd_threshold,
+    count(DISTINCT CASE WHEN holder_counts.balance / pow(10, holder_counts.decimals) >= holder_counts.min_tokens_needed 
+                       THEN holder_counts.holder_address END) as holder_count
+FROM holder_counts
+GROUP BY 
+    holder_counts.mint_address, 
+    holder_counts.timestamp, 
+    holder_counts.usd_threshold
 "#;
 
 pub const TOKEN_CONCENTRATION_MV_SQL: &str = r#"
-CREATE MATERIALIZED VIEW IF NOT EXISTS token_concentration_mv
+CREATE MATERIALIZED VIEW token_concentration_mv
 TO token_concentration
 AS SELECT
-    holders.mint_address,
-    ts.timestamp,
-    t.top_n,
-    sum(holders.amount) / any(ts.supply) * 100 as percentage
+    thb.mint_address as mint_address, 
+    toDateTime(ts.timestamp, 'UTC') as timestamp,
+    t.top_n as top_n,
+    sum(thb.balance) / any(ts.supply) * 100 as percentage
 FROM (
     SELECT 
         mint_address,
         holder_address,
-        sumMerge(total_amount) as amount,
-        row_number() OVER (PARTITION BY mint_address ORDER BY amount DESC) as holder_rank
-    FROM token_holder_balances_mv
-    GROUP BY mint_address, holder_address
-) holders
+        balance,
+        toDateTime(timestamp, 'UTC') as timestamp,
+        row_number() OVER (PARTITION BY mint_address, timestamp ORDER BY balance DESC) as holder_rank
+    FROM token_holder_balances
+) thb
 CROSS JOIN (
     SELECT 1 AS top_n
     UNION ALL SELECT 10
@@ -151,49 +204,40 @@ CROSS JOIN (
     UNION ALL SELECT 100
     UNION ALL SELECT 250
 ) t
-JOIN token_stats ts ON holders.mint_address = ts.mint_address
+JOIN token_stats ts ON thb.mint_address = ts.mint_address AND thb.timestamp = ts.timestamp
 WHERE holder_rank <= t.top_n
-GROUP BY holders.mint_address, ts.timestamp, t.top_n
+GROUP BY thb.mint_address, ts.timestamp, t.top_n;
 "#;
 
 pub const TOKEN_DISTRIBUTION_MV_SQL: &str = r#"
 CREATE MATERIALIZED VIEW IF NOT EXISTS token_distribution_mv
 TO token_distribution
-AS WITH supply AS (
-    SELECT mint_address, timestamp, any(supply) as supply
-    FROM token_stats
-    GROUP BY mint_address, timestamp
-),
-balances AS (
+AS 
+WITH all_metrics AS (
     SELECT 
-        mint_address,
-        sumMerge(total_amount) as balance
-    FROM token_holder_balances_mv
-    GROUP BY mint_address
-),
-metrics AS (
-    SELECT
-        t1.mint_address as mint_address,
-        ts.timestamp as timestamp,
-        t1.balance as balance,
-        t2.balance as balance2,
-        ts.supply as supply
-    FROM balances t1
-    CROSS JOIN balances t2
-    JOIN supply ts ON t1.mint_address = ts.mint_address
+        thb.mint_address as mint_address,
+        thb.timestamp as timestamp,
+        thb.balance as balance,
+        ts.supply as supply,
+        tt.token_amount as threshold_amount
+    FROM token_holder_balances thb
+    JOIN token_stats ts ON thb.mint_address = ts.mint_address AND thb.timestamp = ts.timestamp
+    JOIN token_thresholds tt ON thb.mint_address = tt.mint_address 
+        AND thb.timestamp = tt.timestamp
+        AND tt.usd_threshold = 10
 )
-SELECT
-    mint_address,
-    timestamp,
-    sum(pow((balance / supply) * 100, 2)) as hhi,
-    count() as denominator,
-    CASE 
-        WHEN count() > 0 THEN (1 - (
-            sum(abs(balance - balance2)) / 
-            (2 * count() * supply / count())
-        )) * 100 
-        ELSE 0 
-    END as distribution_score
-FROM metrics
-GROUP BY mint_address, timestamp, supply
+SELECT 
+    all_metrics.mint_address,
+    all_metrics.timestamp,
+    -- All holders metrics
+    sum(pow((all_metrics.balance / all_metrics.supply) * 100, 2)) as hhi,
+    1 - (sum(pow((all_metrics.balance / all_metrics.supply), 2)) / pow(sum(all_metrics.balance / all_metrics.supply), 2)) as distribution_score,
+    -- Holders above $10 metrics
+    sum(pow((CASE WHEN all_metrics.balance >= all_metrics.threshold_amount THEN all_metrics.balance ELSE 0 END) / all_metrics.supply * 100, 2)) as hhi_10usd,
+    1 - (
+        sum(pow((CASE WHEN all_metrics.balance >= all_metrics.threshold_amount THEN all_metrics.balance ELSE 0 END) / all_metrics.supply, 2)) / 
+        pow(sum(CASE WHEN all_metrics.balance >= all_metrics.threshold_amount THEN all_metrics.balance / all_metrics.supply ELSE 0 END), 2)
+    ) as distribution_score_10usd
+FROM all_metrics
+GROUP BY all_metrics.mint_address, all_metrics.timestamp
 "#;

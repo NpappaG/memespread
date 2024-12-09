@@ -7,11 +7,13 @@ use crate::db::schema::{
     EXCLUDED_ACCOUNTS_SQL,
     // Target tables
     TOKEN_HOLDER_BALANCES_TABLE_SQL,
+    TOKEN_THRESHOLDS_TABLE_SQL,
     TOKEN_HOLDER_COUNTS_TABLE_SQL,
     TOKEN_CONCENTRATION_TABLE_SQL,
     TOKEN_DISTRIBUTION_TABLE_SQL,
     // Materialized views
     TOKEN_HOLDER_BALANCES_MV_SQL,
+    TOKEN_THRESHOLDS_MV_SQL,
     TOKEN_HOLDER_COUNTS_MV_SQL,
     TOKEN_CONCENTRATION_MV_SQL,
     TOKEN_DISTRIBUTION_MV_SQL,
@@ -38,6 +40,7 @@ pub async fn init_database(client: &Client) -> Result<()> {
     // Create target tables before MVs
     for sql in [
         TOKEN_HOLDER_BALANCES_TABLE_SQL,
+        TOKEN_THRESHOLDS_TABLE_SQL,
         TOKEN_HOLDER_COUNTS_TABLE_SQL,
         TOKEN_CONCENTRATION_TABLE_SQL,
         TOKEN_DISTRIBUTION_TABLE_SQL,
@@ -53,6 +56,7 @@ pub async fn init_database(client: &Client) -> Result<()> {
     // MVs in dependency order with verification
     let mv_configs = [
         ("token_holder_balances_mv", TOKEN_HOLDER_BALANCES_MV_SQL),
+        ("token_thresholds_mv", TOKEN_THRESHOLDS_MV_SQL),
         ("token_holder_counts_mv", TOKEN_HOLDER_COUNTS_MV_SQL),
         ("token_concentration_mv", TOKEN_CONCENTRATION_MV_SQL),
         ("token_distribution_mv", TOKEN_DISTRIBUTION_MV_SQL),

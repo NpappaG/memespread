@@ -19,6 +19,7 @@ use clickhouse::Client;
 use solana_account_decoder::UiAccountEncoding;
 use crate::db::models::{TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenStatsRecord};
 use crate::db::operations::{insert_token_stats, insert_token_holders, update_monitored_token_timestamp};
+use chrono::{Utc, TimeZone};
 
 
 async fn fetch_and_sort_holders(
@@ -90,36 +91,39 @@ pub async fn get_token_metrics(
         .fetch_one::<i64>()
         .await?;
 
+    // Convert i64 to DateTime<Utc>
+    let latest_ts_datetime = Utc.timestamp_opt(latest_ts, 0).unwrap();
+
     // Get all metrics using the same timestamp
     let (base_stats, holder_count, thresholds, concentration, distribution) = tokio::try_join!(
         clickhouse_client
             .query("SELECT price, supply, market_cap, decimals FROM token_stats WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
-            .bind(latest_ts)
+            .bind(latest_ts_datetime)
             .fetch_one::<TokenStatsRecord>(),
         
         clickhouse_client
             .query("SELECT count() FROM token_holder_balances WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
-            .bind(latest_ts)
+            .bind(latest_ts_datetime)
             .fetch_one::<u32>(),
             
         clickhouse_client
             .query("SELECT usd_threshold, holder_count, percentage FROM token_holder_counts WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
-            .bind(latest_ts)
+            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
             .fetch_all::<TokenHolderThresholdRecord>(),
             
         clickhouse_client
             .query("SELECT top_n, percentage FROM token_concentration WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
-            .bind(latest_ts)
+            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
             .fetch_all::<TokenConcentrationMetricRecord>(),
             
         clickhouse_client
             .query("SELECT hhi, distribution_score FROM token_distribution_metrics WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
-            .bind(latest_ts)
+            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
             .fetch_one::<(f64, f64)>()
     )?;
 
@@ -150,27 +154,27 @@ pub async fn update_token_metrics(
     mint_address: &str,
     clickhouse_client: &Client,
 ) -> Result<(), anyhow::Error> {
-    // Get token info and price
     let mint_pubkey = Pubkey::from_str(mint_address)?;
     let mint_account = client.get_account(&mint_pubkey).await?;
     let mint_data = spl_token::state::Mint::unpack(&mint_account.data)?;
     let price = get_token_price(mint_address).await?;
     let market_cap = price * (mint_data.supply as f64) / 10f64.powi(mint_data.decimals as i32);
 
-    // Insert base token stats
-    insert_token_stats(
+    // Insert stats and get ClickHouse timestamp
+    let timestamp = insert_token_stats(
         clickhouse_client,
         mint_address,
         price,
         mint_data.supply as f64,
         market_cap,
         mint_data.decimals as u8,
+        None,
     ).await?;
 
-    // Get and insert raw holder data
+    // Use the same timestamp for holders
     let holders = fetch_and_sort_holders(client, rate_limiter, &mint_pubkey, 1).await?;
-    insert_token_holders(clickhouse_client, mint_address, &holders).await?;
+    insert_token_holders(clickhouse_client, mint_address, &holders, &timestamp).await?;
     
-    update_monitored_token_timestamp(clickhouse_client, mint_address).await?;
+    update_monitored_token_timestamp(clickhouse_client, mint_address, &timestamp).await?;
     Ok(())
 }
