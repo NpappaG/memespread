@@ -17,7 +17,7 @@ use serde_json::Value;
 use tracing::info;
 use clickhouse::Client;
 use solana_account_decoder::UiAccountEncoding;
-use crate::db::models::{TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenStatsRecord, TokenDistributionMetricRecord};
+use crate::db::models::{TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenStatsRecord};
 use crate::db::operations::{insert_token_stats, insert_token_holders, update_monitored_token_timestamp};
 
 
@@ -85,7 +85,7 @@ pub async fn get_token_metrics(
 ) -> Result<TokenHolderStats, anyhow::Error> {
     // Single query to get latest timestamp for this token's metrics
     let latest_ts = clickhouse_client
-        .query("SELECT max(timestamp) as ts FROM token_distribution_metrics WHERE mint_address = ?")
+        .query("SELECT max(timestamp) as ts FROM token_distribution WHERE mint_address = ?")
         .bind(mint_address)
         .fetch_one::<i64>()
         .await?;
@@ -99,19 +99,19 @@ pub async fn get_token_metrics(
             .fetch_one::<TokenStatsRecord>(),
         
         clickhouse_client
-            .query("SELECT count() FROM token_snapshot_base_mv WHERE mint_address = ? AND timestamp = ?")
+            .query("SELECT count() FROM token_holder_balances WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
             .bind(latest_ts)
             .fetch_one::<u32>(),
             
         clickhouse_client
-            .query("SELECT usd_threshold, holder_count, percentage FROM token_holder_thresholds WHERE mint_address = ? AND timestamp = ?")
+            .query("SELECT usd_threshold, holder_count, percentage FROM token_holder_counts WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
             .bind(latest_ts)
             .fetch_all::<TokenHolderThresholdRecord>(),
             
         clickhouse_client
-            .query("SELECT top_n, percentage FROM token_concentration_metrics WHERE mint_address = ? AND timestamp = ?")
+            .query("SELECT top_n, percentage FROM token_concentration WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
             .bind(latest_ts)
             .fetch_all::<TokenConcentrationMetricRecord>(),
@@ -120,7 +120,7 @@ pub async fn get_token_metrics(
             .query("SELECT hhi, distribution_score FROM token_distribution_metrics WHERE mint_address = ? AND timestamp = ?")
             .bind(mint_address)
             .bind(latest_ts)
-            .fetch_one::<TokenDistributionMetricRecord>()
+            .fetch_one::<(f64, f64)>()
     )?;
 
     Ok(TokenHolderStats {
@@ -139,8 +139,8 @@ pub async fn get_token_metrics(
             top_n: m.top_n as i32,
             percentage: m.percentage,
         }).collect(),
-        hhi: distribution.hhi,
-        distribution_score: distribution.distribution_score,
+        hhi: distribution.0,
+        distribution_score: distribution.1,
     })
 }
 

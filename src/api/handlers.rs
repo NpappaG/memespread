@@ -47,9 +47,12 @@ pub async fn get_token_stats(
         tracing::info!("Token {} not monitored, adding to monitoring", params.mint_address);
         db.query(
             "INSERT INTO monitored_tokens (mint_address, last_stats_update, last_metrics_update) 
-             VALUES (?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00'))
-             ON CONFLICT (mint_address) DO NOTHING"
+             SELECT ?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00')
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM monitored_tokens WHERE mint_address = ?
+             )"
         )
+            .bind(&params.mint_address)
             .bind(&params.mint_address)
             .execute()
             .await

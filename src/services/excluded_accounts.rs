@@ -52,8 +52,8 @@ pub async fn update_excluded_accounts(
     // Get top 300 holders across all monitored tokens
     let large_holders: Vec<(String, f64)> = clickhouse_client
         .query("
-            SELECT DISTINCT holder_address, sum(total_amount) as total
-            FROM token_holder_balances_mv
+            SELECT DISTINCT holder_address, sum(balance) AS total
+            FROM token_holder_balances
             GROUP BY holder_address
             ORDER BY total DESC
             LIMIT 300
@@ -113,10 +113,10 @@ pub async fn check_new_token_exclusions(
     // Get top holders for just this token
     let large_holders: Vec<(String, f64)> = clickhouse_client
         .query("
-            SELECT DISTINCT holder_address, total_amount
-            FROM token_holder_balances_mv
+            SELECT DISTINCT holder_address, balance
+            FROM token_holder_balances
             WHERE mint_address = ?
-            ORDER BY total_amount DESC
+            ORDER BY balance DESC
             LIMIT 300
         ")
         .bind(mint_address)

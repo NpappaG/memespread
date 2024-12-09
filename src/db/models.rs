@@ -34,9 +34,6 @@ pub struct TokenConcentrationMetricRecord {
 #[allow(dead_code)]
 #[derive(Debug, Row, serde::Deserialize)]
 pub struct TokenDistributionMetricRecord {
-    pub mint_address: String,
-    #[serde(with = "clickhouse::serde::time::datetime")]
-    pub timestamp: OffsetDateTime,
     pub hhi: f64,
-    pub distribution_score: f64,
+    pub distribution_score: f64
 }
