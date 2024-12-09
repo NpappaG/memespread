@@ -97,9 +97,10 @@ CREATE TABLE IF NOT EXISTS token_distribution (
     mint_address String,
     timestamp DateTime('UTC'),
     hhi Float64,
-    hhi_10usd Float64,
     distribution_score Float64,
-    distribution_score_10usd Float64,
+    median_balance Float64,
+    total_holders UInt64,
+    mean_balance Float64,
     PRIMARY KEY (mint_address, timestamp)
 ) ENGINE = ReplacingMergeTree
 "#;
@@ -214,28 +215,46 @@ pub const TOKEN_DISTRIBUTION_MV_SQL: &str = r#"
 CREATE MATERIALIZED VIEW IF NOT EXISTS token_distribution_mv
 TO token_distribution
 AS 
+WITH holder_amounts AS (
+    SELECT
+        thb.mint_address as mint_address,
+        thb.timestamp as timestamp,
+        toFloat64(thb.balance) as balance,
+        toFloat64(ts.supply) as supply
+    FROM token_holder_balances thb
+    JOIN (
+        SELECT mint_address, max(timestamp) as max_ts
+        FROM token_stats
+        GROUP BY mint_address
+    ) latest_ts ON thb.mint_address = latest_ts.mint_address
+    JOIN token_stats ts 
+        ON thb.mint_address = ts.mint_address 
+        AND ts.timestamp = latest_ts.max_ts
+),
+ranked_amounts AS (
+    SELECT
+        mint_address,
+        timestamp,
+        balance,
+        supply,
+        row_number() OVER (PARTITION BY mint_address, timestamp ORDER BY balance) as rank,
+        count() OVER (PARTITION BY mint_address, timestamp) as total_count
+    FROM holder_amounts
+)
 SELECT
-    thb.mint_address as mint_address,
-    thb.timestamp as timestamp,
-    sum(pow((thb.balance / ts.supply) * 100, 2)) AS hhi,
-    1 - (sum(pow(thb.balance / ts.supply, 2)) / pow(sum(thb.balance / ts.supply), 2)) AS distribution_score,
-    sum(pow(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0) * 100, 2)) AS hhi_10usd,
-    1 - (sum(pow(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0), 2)) / 
-        pow(sum(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0)), 2)) AS distribution_score_10usd
-FROM token_holder_balances thb
-JOIN (
-    SELECT mint_address, max(timestamp) as max_ts
-    FROM token_stats
-    GROUP BY mint_address
-) latest_ts ON thb.mint_address = latest_ts.mint_address
-JOIN token_stats ts 
-    ON thb.mint_address = ts.mint_address 
-    AND ts.timestamp = latest_ts.max_ts
-JOIN token_thresholds tt 
-    ON thb.mint_address = tt.mint_address 
-    AND tt.timestamp = latest_ts.max_ts
-    AND tt.usd_threshold = 10
+    mint_address,
+    timestamp,
+    sum(pow((balance / supply) * 100, 2)) as hhi,
+    (1 - (
+        sum(balance * (rank - 1))
+        / 
+        (count() * sum(balance))
+    )) * 100 as distribution_score,
+    quantileExact(0.5)(balance) as median_balance,
+    any(total_count) as total_holders,
+    sum(balance) / any(total_count) as mean_balance
+FROM ranked_amounts
 GROUP BY
-    thb.mint_address,
-    thb.timestamp
+    mint_address,
+    timestamp
 "#;
