@@ -172,31 +172,37 @@ GROUP BY
 pub const TOKEN_CONCENTRATION_MV_SQL: &str = r#"
 CREATE MATERIALIZED VIEW IF NOT EXISTS token_concentration_mv
 TO token_concentration
-AS WITH ranked_holders AS
-(
+AS 
+WITH ranked_holders AS (
     SELECT
         thb.mint_address,
         thb.timestamp,
         thb.balance,
         row_number() OVER (PARTITION BY thb.mint_address, thb.timestamp ORDER BY thb.balance DESC) AS rank
-    FROM token_holder_balances AS thb
+    FROM token_holder_balances thb
 )
 SELECT
-    rh.mint_address,
-    rh.timestamp,
+    rh.mint_address as mint_address,
+    rh.timestamp as timestamp,
     t.top_n,
     (sum(rh.balance) / max(ts.supply)) * 100 AS percentage
-FROM ranked_holders AS rh
-INNER JOIN token_stats AS ts ON (rh.mint_address = ts.mint_address) AND (rh.timestamp = ts.timestamp)
-CROSS JOIN
-(
+FROM ranked_holders rh
+JOIN (
+    SELECT mint_address, max(timestamp) as max_ts
+    FROM token_stats
+    GROUP BY mint_address
+) latest_ts ON rh.mint_address = latest_ts.mint_address
+JOIN token_stats ts 
+    ON rh.mint_address = ts.mint_address 
+    AND ts.timestamp = latest_ts.max_ts
+CROSS JOIN (
     SELECT 1 AS top_n
     UNION ALL SELECT 10
     UNION ALL SELECT 25
     UNION ALL SELECT 50
     UNION ALL SELECT 100
     UNION ALL SELECT 250
-) AS t
+) t
 WHERE rh.rank <= t.top_n
 GROUP BY
     rh.mint_address,
@@ -207,16 +213,28 @@ GROUP BY
 pub const TOKEN_DISTRIBUTION_MV_SQL: &str = r#"
 CREATE MATERIALIZED VIEW IF NOT EXISTS token_distribution_mv
 TO token_distribution
-AS SELECT
-    thb.mint_address,
-    thb.timestamp,
+AS 
+SELECT
+    thb.mint_address as mint_address,
+    thb.timestamp as timestamp,
     sum(pow((thb.balance / ts.supply) * 100, 2)) AS hhi,
     1 - (sum(pow(thb.balance / ts.supply, 2)) / pow(sum(thb.balance / ts.supply), 2)) AS distribution_score,
-    sum(pow(multiIf((thb.balance / pow(10, ts.decimals)) >= tt.token_amount, thb.balance / ts.supply, 0) * 100, 2)) AS hhi_10usd,
-    1 - (sum(pow(multiIf((thb.balance / pow(10, ts.decimals)) >= tt.token_amount, thb.balance / ts.supply, 0), 2)) / pow(sum(multiIf((thb.balance / pow(10, ts.decimals)) >= tt.token_amount, thb.balance / ts.supply, 0)), 2)) AS distribution_score_10usd
-FROM token_holder_balances AS thb
-INNER JOIN token_stats AS ts ON (thb.mint_address = ts.mint_address) AND (thb.timestamp = ts.timestamp)
-INNER JOIN token_thresholds AS tt ON (thb.mint_address = tt.mint_address) AND (thb.timestamp = tt.timestamp) AND (tt.usd_threshold = 10)
+    sum(pow(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0) * 100, 2)) AS hhi_10usd,
+    1 - (sum(pow(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0), 2)) / 
+        pow(sum(multiIf(thb.balance / pow(10, ts.decimals) >= tt.token_amount, thb.balance / ts.supply, 0)), 2)) AS distribution_score_10usd
+FROM token_holder_balances thb
+JOIN (
+    SELECT mint_address, max(timestamp) as max_ts
+    FROM token_stats
+    GROUP BY mint_address
+) latest_ts ON thb.mint_address = latest_ts.mint_address
+JOIN token_stats ts 
+    ON thb.mint_address = ts.mint_address 
+    AND ts.timestamp = latest_ts.max_ts
+JOIN token_thresholds tt 
+    ON thb.mint_address = tt.mint_address 
+    AND tt.timestamp = latest_ts.max_ts
+    AND tt.usd_threshold = 10
 GROUP BY
     thb.mint_address,
     thb.timestamp
