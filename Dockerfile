@@ -1,39 +1,28 @@
-FROM rust:1.74-slim as builder
+FROM rust:slim as builder
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    build-essential \
+    g++ \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app
+COPY . .
 
-# Create blank project
-RUN cargo new --bin memespread
-WORKDIR /usr/src/app/memespread
-
-# Copy manifests
-COPY Cargo.lock Cargo.toml ./
-
-# Cache dependencies
-RUN cargo build --release
-RUN rm src/*.rs
-
-# Copy source code
-COPY src ./src
-
-# Build for release
-RUN rm ./target/release/deps/memespread*
 RUN cargo build --release
 
-# Runtime image
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
-COPY --from=builder /usr/src/app/memespread/target/release/memespread /usr/local/bin/
+COPY --from=builder /usr/src/app/target/release/memespread /usr/local/bin/
 
-# Create non-root user
-RUN useradd -m appuser
-USER appuser
+EXPOSE 3000
 
-# Set environment variables
-ENV RUST_LOG=info
-
-# Command to run
 CMD ["memespread"]
