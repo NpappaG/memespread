@@ -6,9 +6,11 @@ use serde::Deserialize;
 use std::sync::Arc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
-use crate::db::operations::{get_latest_token_stats, structure_token_stats};
+use crate::db::operations::structure_token_stats;
+use crate::services::token::get_token_metrics;
 use clickhouse::Client;
 use super::error::ApiError;
+use crate::services::excluded_accounts::check_new_token_exclusions;
 
 pub type AppState = (
     Arc<RpcClient>,
@@ -25,17 +27,13 @@ pub async fn get_token_stats(
     State((_rpc_client, rate_limiter, db)): State<AppState>,
     Query(params): Query<TokenParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Wait for rate limiter before proceeding
     rate_limiter.until_ready().await;
     
     tracing::info!("Received request for token: {}", params.mint_address);
     
-    // First check if token is monitored
+    // Check if token is monitored
     let is_monitored = db.query(
-        "SELECT mint_address 
-         FROM monitored_tokens 
-         WHERE mint_address = ? 
-         LIMIT 1"
+        "SELECT mint_address FROM monitored_tokens WHERE mint_address = ? LIMIT 1"
     )
         .bind(&params.mint_address)
         .fetch_optional::<String>()
@@ -45,21 +43,25 @@ pub async fn get_token_stats(
             ApiError::DatabaseError(e.to_string())
         })?;
 
-    tracing::info!("Token {} monitored status: {:?}", params.mint_address, is_monitored);
-
     if is_monitored.is_none() {
-        // Instead of immediately fetching data, just add to monitoring
         tracing::info!("Token {} not monitored, adding to monitoring", params.mint_address);
-        
-        // Add to monitored_tokens
         db.query(
             "INSERT INTO monitored_tokens (mint_address, last_stats_update, last_metrics_update) 
-             VALUES (?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00'))"
+             SELECT ?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00')
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM monitored_tokens WHERE mint_address = ?
+             )"
         )
+            .bind(&params.mint_address)
             .bind(&params.mint_address)
             .execute()
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+        // Check for excluded accounts for this new token
+        if let Err(e) = check_new_token_exclusions(&_rpc_client, &rate_limiter, &db, &params.mint_address).await {
+            tracing::error!("Failed to check excluded accounts for new token: {}", e);
+        }
 
         return Ok(Json(serde_json::json!({
             "status": "monitoring_started",
@@ -67,19 +69,10 @@ pub async fn get_token_stats(
         })));
     }
 
-    // Get stats for monitored token
-    tracing::info!("Fetching stats for monitored token: {}", params.mint_address);
-    match get_latest_token_stats(&db, &params.mint_address).await {
-        Ok(Some(stats)) => {
+    match get_token_metrics(&db, &params.mint_address).await {
+        Ok(stats) => {
             tracing::info!("Successfully retrieved stats for {}", params.mint_address);
             Ok(Json(structure_token_stats(stats)))
-        },
-        Ok(None) => {
-            tracing::info!("No stats available for monitored token: {}", params.mint_address);
-            Ok(Json(serde_json::json!({
-                "status": "no_data",
-                "message": "Token is monitored but no data is available yet."
-            })))
         },
         Err(e) => {
             tracing::error!("Error fetching stats: {}", e);
@@ -87,4 +80,3 @@ pub async fn get_token_stats(
         }
     }
 }
-
