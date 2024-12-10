@@ -12,14 +12,13 @@ use std::sync::Arc;
 use std::str::FromStr;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
 use rayon::prelude::*;
-use crate::types::models::{TokenHolderStats, HolderThreshold, ConcentrationMetric};
+use crate::types::models::{TokenHolderStats, HolderThreshold, ConcentrationMetric, TokenStats, DistributionStats};
 use serde_json::Value;
 use tracing::info;
 use clickhouse::Client;
 use solana_account_decoder::UiAccountEncoding;
-use crate::db::models::{TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenStatsRecord};
+use crate::db::models::{TokenStatsRecord, TokenHolderThresholdRecord, TokenConcentrationMetricRecord, TokenDistributionMetricRecord};
 use crate::db::operations::{insert_token_stats, insert_token_holders};
-use chrono::{Utc, TimeZone};
 
 
 async fn fetch_and_sort_holders(
@@ -84,67 +83,97 @@ pub async fn get_token_metrics(
     clickhouse_client: &Client,
     mint_address: &str,
 ) -> Result<TokenHolderStats, anyhow::Error> {
-    // Single query to get latest timestamp for this token's metrics
-    let latest_ts = clickhouse_client
-        .query("SELECT max(timestamp) as ts FROM token_distribution WHERE mint_address = ?")
+    // Get token stats
+    let stats: TokenStatsRecord = clickhouse_client
+        .query("SELECT price, supply, market_cap, decimals FROM token_stats WHERE mint_address = ? ORDER BY timestamp DESC LIMIT 1")
         .bind(mint_address)
-        .fetch_one::<i64>()
+        .fetch_one()
         .await?;
 
-    // Convert i64 to DateTime<Utc>
-    let latest_ts_datetime = Utc.timestamp_opt(latest_ts, 0).unwrap();
+    // Get distribution metrics
+    let distribution: Option<TokenDistributionMetricRecord> = clickhouse_client
+        .query("SELECT mint_address, timestamp, hhi, distribution_score FROM token_distribution WHERE mint_address = ? ORDER BY timestamp DESC LIMIT 1")
+        .bind(mint_address)
+        .fetch_optional()
+        .await?;
 
-    // Get all metrics using the same timestamp
-    let (base_stats, holder_count, thresholds, concentration, distribution) = tokio::try_join!(
-        clickhouse_client
-            .query("SELECT price, supply, market_cap, decimals FROM token_stats WHERE mint_address = ? AND timestamp = ?")
-            .bind(mint_address)
-            .bind(latest_ts_datetime)
-            .fetch_one::<TokenStatsRecord>(),
-        
-        clickhouse_client
-            .query("SELECT count() FROM token_holder_balances WHERE mint_address = ? AND timestamp = ?")
-            .bind(mint_address)
-            .bind(latest_ts_datetime)
-            .fetch_one::<u32>(),
-            
-        clickhouse_client
-            .query("SELECT usd_threshold, holder_count, percentage FROM token_holder_counts WHERE mint_address = ? AND timestamp = ?")
-            .bind(mint_address)
-            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
-            .fetch_all::<TokenHolderThresholdRecord>(),
-            
-        clickhouse_client
-            .query("SELECT top_n, percentage FROM token_concentration WHERE mint_address = ? AND timestamp = ?")
-            .bind(mint_address)
-            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
-            .fetch_all::<TokenConcentrationMetricRecord>(),
-            
-        clickhouse_client
-            .query("SELECT hhi, distribution_score FROM token_distribution_metrics WHERE mint_address = ? AND timestamp = ?")
-            .bind(mint_address)
-            .bind(format!("{} UTC", latest_ts_datetime.format("%Y-%m-%d %H:%M:%S")))
-            .fetch_one::<(f64, f64)>()
-    )?;
+    // Get holder thresholds
+    info!("Fetching holder thresholds for mint: {}", mint_address);
+    let thresholds: Vec<TokenHolderThresholdRecord> = clickhouse_client
+        .query("
+            SELECT 
+                mint_address,
+                timestamp,
+                usd_threshold,
+                holder_count,
+                total_holders,
+                pct_total_holders,
+                pct_of_10usd,
+                mcap_per_holder,
+                slice_value_usd
+            FROM token_holder_counts 
+            WHERE mint_address = ? 
+            ORDER BY timestamp DESC, usd_threshold ASC
+            LIMIT 5
+        ")
+        .bind(mint_address)
+        .fetch_all()
+        .await?;
+
+    // Get concentration metrics - fetch all records for the latest timestamp
+    let concentration: Vec<TokenConcentrationMetricRecord> = clickhouse_client
+        .query("
+            SELECT 
+                mint_address,
+                timestamp,
+                top_n,
+                percentage
+            FROM token_concentration 
+            WHERE mint_address = ? 
+            ORDER BY timestamp DESC, top_n ASC
+            LIMIT 6
+        ")
+        .bind(mint_address)
+        .fetch_all()
+        .await?;
+
+    // Add debug logging
+    tracing::info!("Found {} concentration metrics: {:?}", concentration.len(), 
+        concentration.iter().map(|c| c.top_n).collect::<Vec<_>>());
+
+    tracing::info!("Thresholds count: {}", thresholds.len());
+    tracing::info!("First threshold: {:?}", thresholds.first());
+
+    let holder_thresholds = thresholds.into_iter().map(|t| HolderThreshold {
+        usd_threshold: t.usd_threshold,
+        holder_count: t.holder_count as u64,
+        total_holders: t.total_holders as u64,
+        pct_total_holders: t.pct_total_holders,
+        pct_of_10usd: t.pct_of_10usd,
+        mcap_per_holder: t.mcap_per_holder,
+        slice_value_usd: t.slice_value_usd
+    }).collect();
 
     Ok(TokenHolderStats {
         mint_address: mint_address.to_string(),
-        price: base_stats.price,
-        supply: base_stats.supply,
-        market_cap: base_stats.market_cap,
-        decimals: base_stats.decimals,
-        total_count: holder_count as usize,
-        holder_thresholds: thresholds.into_iter().map(|t| HolderThreshold {
-            usd_threshold: t.usd_threshold,
-            count: t.holder_count as u64,
-            percentage: t.percentage,
+        token_stats: TokenStats {
+            price: stats.price,
+            supply: stats.supply,
+            market_cap: stats.market_cap,
+            decimals: stats.decimals,
+        },
+        distribution_stats: DistributionStats {
+            total_count: 0,
+            hhi: distribution.as_ref().map_or(0.0, |d| d.hhi),
+            distribution_score: distribution.as_ref().map_or(0.0, |d| d.distribution_score),
+            median_balance: 0.0,
+            mean_balance: 0.0,
+        },
+        holder_thresholds,
+        concentration_metrics: concentration.into_iter().map(|c| ConcentrationMetric {
+            top_n: c.top_n as i32,
+            percentage: c.percentage,
         }).collect(),
-        concentration_metrics: concentration.into_iter().map(|m| ConcentrationMetric {
-            top_n: m.top_n as i32,
-            percentage: m.percentage,
-        }).collect(),
-        hhi: distribution.0,
-        distribution_score: distribution.1,
     })
 }
 

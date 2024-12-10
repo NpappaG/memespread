@@ -100,24 +100,35 @@ pub async fn update_monitored_token_timestamp(
 
 pub fn structure_token_stats(data: TokenHolderStats) -> serde_json::Value {
     serde_json::json!({
+        "token_stats": {
+            "decimals": data.token_stats.decimals,
+            "market_cap": (data.token_stats.market_cap * 100.0).round() / 100.0,
+            "price": (data.token_stats.price * 1000000000.0).round() / 1000000000.0,
+            "supply": (data.token_stats.supply * 100.0).round() / 100.0
+        },
+        "distribution_stats": {
+            "distribution_score": (data.distribution_stats.distribution_score * 10000.0).round() / 10000.0,
+            "hhi": (data.distribution_stats.hhi * 10000.0).round() / 10000.0,
+            "median_balance": data.distribution_stats.median_balance,
+            "mean_balance": data.distribution_stats.mean_balance,
+            "total_count": data.distribution_stats.total_count
+        },
+        "holder_thresholds": data.holder_thresholds.iter().map(|h| {
+            serde_json::json!({
+                "usd_threshold": h.usd_threshold,
+                "holder_count": h.holder_count,
+                "total_holders": h.total_holders,
+                "pct_total_holders": (h.pct_total_holders * 10000.0).round() / 10000.0,
+                "pct_of_10usd": (h.pct_of_10usd * 10000.0).round() / 10000.0,
+                "mcap_per_holder": (h.mcap_per_holder * 100.0).round() / 100.0,
+                "slice_value_usd": (h.slice_value_usd * 100.0).round() / 100.0
+            })
+        }).collect::<Vec<_>>(),
         "concentration_metrics": data.concentration_metrics.iter().map(|m| {
             serde_json::json!({
                 "top_n": m.top_n,
                 "percentage": (m.percentage * 10000.0).round() / 10000.0
             })
-        }).collect::<Vec<_>>(),
-        "holder_thresholds": data.holder_thresholds.iter().map(|h| {
-            serde_json::json!({
-                "usd_threshold": h.usd_threshold,
-                "count": h.count,
-                "percentage": (h.percentage * 10000.0).round() / 10000.0
-            })
-        }).collect::<Vec<_>>(),
-        "decimals": data.decimals,
-        "distribution_score": (data.distribution_score * 10000.0).round() / 10000.0,
-        "hhi": (data.hhi * 10000.0).round() / 10000.0,
-        "market_cap": (data.market_cap * 100.0).round() / 100.0,
-        "price": (data.price * 1000000000.0).round() / 1000000000.0,
-        "supply": (data.supply * 100.0).round() / 100.0
+        }).collect::<Vec<_>>()
     })
 }
