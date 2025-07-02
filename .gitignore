@@ -36,10 +36,13 @@ uuid
 status
 store/
 metadata/
+metadata_dropped/
 *.status
 *.uuid
 preprocessed_configs/
 tmp/
 user_defined/
-workload/metadata_dropped/
-metadata/
+user_files/
+dictionaries_lib/
+flags/
+format_schemas/
