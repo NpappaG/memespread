@@ -65,18 +65,21 @@ async fn fetch_and_sort_holders(
 
 
 async fn get_token_price(mint_address: &str) -> Result<f64, anyhow::Error> {
-    let url = format!("https://api.jup.ag/price/v2?ids={}", mint_address);
+    let url = format!("https://lite-api.jup.ag/price/v3?ids={}", mint_address);
     let response = reqwest::get(url).await?;
     let json: Value = response.json().await?;
     
     info!("Jupiter API response: {:?}", json);
     
-    let price = json["data"][mint_address]["price"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse price"))?
-        .parse::<f64>()?;
+    // The new API format returns data directly without a "data" wrapper
+    // and uses "usdPrice" instead of "price"
+    if let Some(token_data) = json.get(mint_address) {
+        if let Some(price) = token_data["usdPrice"].as_f64() {
+            return Ok(price);
+        }
+    }
     
-    Ok(price)
+    Err(anyhow::anyhow!("Failed to parse price from Jupiter API response"))
 }
 
 pub async fn get_token_metrics(
