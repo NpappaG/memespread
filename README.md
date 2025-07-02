@@ -22,13 +22,13 @@
 
    For more installation options, see the [ClickHouse installation docs](https://clickhouse.com/docs/install).
 
-3. In one terminal, start the ClickHouse server:
+3. In one terminal, first start the ClickHouse DB server:
 
    ```bash
    clickhouse-server
    ```
 
-4. In another terminal, run the application in debug mode:
+4. In a second terminal, run the application in debug mode:
 
    ```bash
    cargo run debug=true
@@ -36,7 +36,7 @@
 
    The application will automatically connect to the "default" ClickHouse database and initialize all necessary tables and materialized views on startup.
 
-   **Verify Setup**: After startup, you can verify the database was created correctly by visiting `http://localhost:8123/play` in your browser. This opens ClickHouse's web interface where you can run `SHOW TABLES;` to see all the created tables.
+5. **Verify Setup**: After startup, you can verify the database was created correctly by visiting `http://localhost:8123/play` in your browser. This opens ClickHouse's web interface where you can run `SHOW TABLES;` to see all the created tables.
 
 ### Option 2: Docker
 
@@ -52,16 +52,15 @@
    docker-compose up --build
    ```
 
-This will:
+3. **Verify Setup**: After startup, you can verify the database was created correctly by:
 
-- Build and start the memespread application
-- Start ClickHouse server with proper configuration
-- Set up health checks and networking
-- Expose the API on `http://localhost:3000`
-
-  **Verify Setup**: After startup, you can verify the database was created correctly by visiting `http://localhost:8123/play` in your browser. This opens ClickHouse's web interface where you can run `SHOW TABLES;` to see all the created tables.
+   - Visit `http://localhost:8123/play` in your browser to access ClickHouse's web interface
+   - Run `SHOW TABLES;` to see all created tables
+   - Run `SELECT 1;` to verify the connection is working
 
 ## Usage
+
+**Browser Interface**: You can interact with the API directly in your browser by visiting the URL above. (Or GET the endpoint below with an app) You may want to build a frontend application to provide a more polished user experience for querying and visualizing token concentration data.
 
 ### Adding a Coin to the Clickhouse DB for Monitoring
 
@@ -71,9 +70,7 @@ To add a coin to the database, navigate to:
 http://localhost:3000/token-stats?mint_address={solcontractaddress}
 ```
 
-Replace `{solcontractaddress}` with the actual Solana contract address.
-
-**Browser Interface**: You can interact with the API directly in your browser by visiting the URL above. While this is a simple way to test, you could also build a frontend application to provide a more polished user experience for querying and visualizing token concentration data.
+Replace `{solcontractaddress}` with the actual Solana contract address / mint address (only SPL tokens currently).
 
 **First Visit**: If the coin is not already being monitored, that mint addrss will be added to the monitoring system.
 
@@ -89,6 +86,8 @@ Wait 1-2 minutes to populate Clickhouse with enough observations.
 - **Token Stats**: Market cap, price, supply, decimals
 
 These are calculated using the power of Materialized Views in Clickhouse.
+
+### API response
 
 Example response for a monitored coin with a few observations:
 
@@ -132,35 +131,53 @@ Example response for a monitored coin with a few observations:
 }
 ```
 
-### Data Population
+## Database Management
 
-Wait 1-2 minutes for data to start populating in the materialized views.
+If there's problems with the app adding data (eg an invalid mint address), you may need to hand-edit the database. There's a few methods to connect to your Clickhouse DB:
 
-### Database Management
+#### In-browser (recommended)
 
-To connect to ClickHouse and manage data:
+```bash
+http://localhost:8123/play
+```
+
+#### Local dev: in-terminal
 
 ```bash
 # Connect to ClickHouse client
 clickhouse-client
+```
 
-# Or if using Docker
+# Docker: in-terminal
+
+```
 docker exec -it <container_name> clickhouse-client
 ```
 
-Common commands:
+#### Common commands
+
+Test if DB has ~14 default tables:
 
 ```sql
 -- List tables
 SHOW TABLES;
+```
 
--- Delete specific token data
-DELETE FROM token_holders WHERE mint_address = 'your_token_address';
-DELETE FROM token_stats WHERE mint_address = 'your_token_address';
+Remove a token from monitoring:
+
+```sql
+-- Delete a token from monitoring
 DELETE FROM monitored_tokens WHERE mint_address = 'your_token_address';
+```
 
--- Clear all data for fresh start
-TRUNCATE TABLE token_holders;
-TRUNCATE TABLE token_stats;
-TRUNCATE TABLE monitored_tokens;
+Nuclear option to kill entire default db [Warning: deletes data - restart app/Docker container to re-make db]
+
+```sql
+-- Clear all data for fresh start (restart app)
+DROP DATABASE DEFAULT;
+```
+
+```sql
+-- Clear all data for fresh start (restart app)
+CREATE DATABASE DEFAULT;
 ```
