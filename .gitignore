@@ -43,6 +43,7 @@ preprocessed_configs/
 tmp/
 user_defined/
 user_files/
+user_scripts/
 dictionaries_lib/
 flags/
 format_schemas/
