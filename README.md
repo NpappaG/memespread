@@ -1,4 +1,4 @@
-# memespread
+# Memespread - track holders & concentration of Solana coins in real-time with Clickhouse DB
 
 **memespread** was born to examine with extreme precision just how much supply of a coin is concentrated and how this concentration changes over time. Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
 
