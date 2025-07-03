@@ -23,6 +23,6 @@ RUN apt-get update && \
 
 COPY --from=builder /usr/src/app/target/release/memespread /usr/local/bin/
 
-EXPOSE 3000
+EXPOSE 8000
 
 CMD ["memespread"]

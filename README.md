@@ -67,7 +67,7 @@
 To add a coin to the database, navigate to:
 
 ```
-http://localhost:3000/token-stats?mint_address={solcontractaddress}
+http://localhost:8000/token-stats?mint_address={solcontractaddress}
 ```
 
 Replace `{solcontractaddress}` with the actual Solana contract address / mint address (only SPL tokens currently).
@@ -176,6 +176,8 @@ Nuclear option to kill entire default db [Warning: deletes data - restart app/Do
 -- Clear all data for fresh start (restart app)
 DROP DATABASE DEFAULT;
 ```
+
+Then:
 
 ```sql
 -- Clear all data for fresh start (restart app)

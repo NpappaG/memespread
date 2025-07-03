@@ -1,0 +1,29 @@
+<!-- static/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Contract Address Submit</title>
+</head>
+<body>
+    <h1>Submit Contract Address</h1>
+    <form id="contract-form">
+        <input type="text" id="contract" name="contract" placeholder="Enter contract address" required>
+        <button type="submit">Submit</button>
+    </form>
+    <div id="result"></div>
+    <script>
+        document.getElementById('contract-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const contract = document.getElementById('contract').value;
+            const res = await fetch('/submit', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ contract })
+            });
+            const data = await res.text();
+            document.getElementById('result').innerText = data;
+        });
+    </script>
+</body>
+</html>

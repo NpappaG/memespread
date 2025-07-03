@@ -11,6 +11,10 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use clickhouse::Client;
 use crate::db::init::init_database;
 use tokio::time::{sleep, Duration};
+use poem::{handler, Route, Server, get, post, web::{Json, Data}, Response, IntoResponse};
+use poem::EndpointExt;
+use serde::Deserialize;
+use reqwest::Client as ReqwestClient;
 
 mod types;
 mod services;
@@ -44,8 +48,64 @@ async fn connect_to_clickhouse(max_retries: u32) -> Result<Client> {
     unreachable!()
 }
 
+#[derive(Deserialize)]
+struct ContractInput {
+    contract: String,
+}
+
+#[handler]
+async fn submit(Json(input): Json<ContractInput>, client: Data<&ReqwestClient>) -> impl IntoResponse {
+    // Forward the contract address to the backend API
+    let url = format!("http://localhost:8000/token-stats?mint_address={}", input.contract);
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            match resp.text().await {
+                Ok(body) => body,
+                Err(_) => "Failed to read backend response".to_string(),
+            }
+        }
+        Err(_) => "Failed to contact backend".to_string(),
+    }
+}
+
+#[handler]
+async fn index() -> impl IntoResponse {
+    Response::builder()
+        .content_type("text/html")
+        .body(
+            r#"<!DOCTYPE html>
+            <html>
+            <body>
+                <h1>Contract Stats</h1>
+                <form id="contract-form">
+                    <input type="text" id="contract" placeholder="Enter contract address">
+                    <button type="submit">Submit</button>
+                </form>
+                <div id="result"></div>
+                <script>
+                    document.getElementById('contract-form').addEventListener('submit', async (e) => {
+                        e.preventDefault();
+                        const contract = document.getElementById('contract').value;
+                        const res = await fetch('/submit', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({contract})
+                        });
+                        document.getElementById('result').innerText = await res.text();
+                    });
+                </script>
+            </body>
+            </html>"#
+        )
+}
+
+#[handler]
+async fn api_hello() -> &'static str {
+    "Hello from API!"
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt::init();
     
     dotenv().ok();
@@ -74,7 +134,7 @@ async fn main() -> Result<()> {
     let state = (rpc_client.clone(), rpc_limiter.clone(), client.clone());
     let app = create_router(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
     tracing::info!("Listening on {}", addr);
     
     let listener = TcpListener::bind(addr).await?;
@@ -105,6 +165,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Frontend server
+    let client = ReqwestClient::new();
+    let frontend_routes = Route::new()
+        .at("/", get(index))
+        .at("/submit", post(submit.data(client)));
+    let frontend_server = Server::new(poem::listener::TcpListener::bind("0.0.0.0:3000")).run(frontend_routes);
+
+    let frontend_handle = tokio::spawn(frontend_server);
+
     // Run both the API server and monitoring service concurrently
     tokio::select! {
         result = axum::serve(listener, app.into_make_service()) => {
@@ -117,6 +186,9 @@ async fn main() -> Result<()> {
         }
         _ = excluded_accounts_handle => {
             tracing::info!("Excluded accounts service finished");
+        }
+        _ = frontend_handle => {
+            tracing::info!("Frontend server finished");
         }
     }
 
