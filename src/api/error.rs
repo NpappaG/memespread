@@ -12,6 +12,8 @@ pub enum ApiError {
     DatabaseError(String),
     #[error("Token {0} is not being monitored")]
     TokenNotMonitored(String),
+    #[error("{0}")]
+    InvalidInput(String),
 }
 
 #[derive(Serialize)]
@@ -25,6 +27,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::DatabaseError(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::TokenNotMonitored(_) => StatusCode::NOT_FOUND,
+            ApiError::InvalidInput(_) => StatusCode::BAD_REQUEST,
         };
 
         let body = Json(ErrorResponse {

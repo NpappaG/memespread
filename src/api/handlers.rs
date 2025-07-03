@@ -7,7 +7,7 @@ use std::sync::Arc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
 use crate::db::operations::structure_token_stats;
-use crate::services::token::get_token_metrics;
+use crate::services::token::{get_token_metrics, get_token_price};
 use clickhouse::Client;
 use super::error::ApiError;
 use crate::services::excluded_accounts::check_new_token_exclusions;
@@ -36,6 +36,13 @@ pub struct TokenListItem {
     last_metrics_update: String,
 }
 
+async fn validate_token_with_jupiter(mint_address: &str) -> Result<(), ApiError> {
+    match get_token_price(mint_address).await {
+        Ok(_) => Ok(()),
+        Err(_) => Err(ApiError::InvalidInput("Invalid token address".to_string()))
+    }
+}
+
 pub async fn create_token_monitor(
     State((_rpc_client, rate_limiter, db)): State<AppState>,
     Json(params): Json<CreateTokenRequest>,
@@ -43,6 +50,10 @@ pub async fn create_token_monitor(
     rate_limiter.until_ready().await;
     
     tracing::info!("Received request to monitor token: {}", params.mint_address);
+    
+    // Validate token with Jupiter first
+    validate_token_with_jupiter(&params.mint_address).await?;
+    tracing::info!("Token validation successful, proceeding with monitoring setup");
     
     // Check if token is already monitored
     let is_monitored = db.query(

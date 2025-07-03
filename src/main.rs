@@ -11,8 +11,22 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use clickhouse::Client;
 use crate::db::init::init_database;
 use tokio::time::{sleep, Duration};
-use poem::{handler, Route, Server, get, post, web::{Json, Path}, Response, IntoResponse, middleware::Cors, EndpointExt};
+use poem::{
+    handler, 
+    Route, 
+    Server, 
+    get, 
+    post, 
+    web::{Json, Path}, 
+    Response, 
+    IntoResponse, 
+    middleware::Cors, 
+    EndpointExt,
+    http::StatusCode,
+};
 use serde::{Deserialize, Serialize};
+use reqwest;
+use serde_json;
 
 mod types;
 mod services;
@@ -53,9 +67,33 @@ struct ContractInput {
 
 #[handler]
 async fn submit(Json(input): Json<ContractInput>) -> impl IntoResponse {
-    Response::builder()
-        .content_type("application/json")
-        .body(format!("{{\"status\": \"success\", \"message\": \"Token {} submitted for monitoring\"}}", input.contract))
+    let client = reqwest::Client::new();
+    let response = match client.post("http://localhost:8000/tokens")
+        .json(&serde_json::json!({
+            "mint_address": input.contract
+        }))
+        .send()
+        .await {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.text().await {
+                    Ok(text) => Response::builder()
+                        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_REQUEST))
+                        .content_type("application/json")
+                        .body(text),
+                    Err(_) => Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .content_type("application/json")
+                        .body(r#"{"error": "Failed to read API response"}"#)
+                }
+            },
+            Err(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .content_type("application/json")
+                .body(r#"{"error": "Failed to connect to API"}"#)
+        };
+    
+    response
 }
 
 #[handler]

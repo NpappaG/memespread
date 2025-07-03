@@ -64,7 +64,7 @@ async fn fetch_and_sort_holders(
 }
 
 
-async fn get_token_price(mint_address: &str) -> Result<f64, anyhow::Error> {
+pub async fn get_token_price(mint_address: &str) -> Result<f64, anyhow::Error> {
     let url = format!("https://lite-api.jup.ag/price/v3?ids={}", mint_address);
     let response = reqwest::get(url).await?;
     let json: Value = response.json().await?;
