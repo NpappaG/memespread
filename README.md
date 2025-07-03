@@ -1,4 +1,4 @@
-# memespread
+# Memespread - track holders & concentration of Solana coins in real-time with Clickhouse DB
 
 **memespread** was born to examine with extreme precision just how much supply of a coin is concentrated and how this concentration changes over time. Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
 
@@ -67,7 +67,7 @@
 To add a coin to the database, navigate to:
 
 ```
-http://localhost:3000/token-stats?mint_address={solcontractaddress}
+http://localhost:8000/token-stats?mint_address={solcontractaddress}
 ```
 
 Replace `{solcontractaddress}` with the actual Solana contract address / mint address (only SPL tokens currently).
@@ -176,6 +176,8 @@ Nuclear option to kill entire default db [Warning: deletes data - restart app/Do
 -- Clear all data for fresh start (restart app)
 DROP DATABASE DEFAULT;
 ```
+
+Then:
 
 ```sql
 -- Clear all data for fresh start (restart app)

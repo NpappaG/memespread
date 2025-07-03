@@ -10,6 +10,10 @@ use thiserror::Error;
 pub enum ApiError {
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Token {0} is not being monitored")]
+    TokenNotMonitored(String),
+    #[error("{0}")]
+    InvalidInput(String),
 }
 
 #[derive(Serialize)]
@@ -22,6 +26,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::DatabaseError(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::TokenNotMonitored(_) => StatusCode::NOT_FOUND,
+            ApiError::InvalidInput(_) => StatusCode::BAD_REQUEST,
         };
 
         let body = Json(ErrorResponse {
