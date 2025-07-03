@@ -67,8 +67,14 @@ async fn token_details(Path(mint_address): Path<String>) -> impl IntoResponse {
             <html>
             <head>
                 <style>
-                    body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }}
-                    h1 {{ color: #333; }}
+                    body {{ 
+                        font-family: Arial, sans-serif; 
+                        max-width: 1200px; 
+                        margin: 40px auto; 
+                        padding: 0 20px;
+                        background: #f9f9f9;
+                    }}
+                    h1, h2 {{ color: #333; }}
                     .back-link {{ 
                         display: inline-block;
                         margin-bottom: 20px;
@@ -76,46 +82,324 @@ async fn token_details(Path(mint_address): Path<String>) -> impl IntoResponse {
                         text-decoration: none;
                     }}
                     .back-link:hover {{ color: #333; }}
-                    #result {{ 
-                        margin-top: 20px;
-                        padding: 15px;
-                        border: 1px solid #ddd;
-                        border-radius: 4px;
-                        min-height: 100px;
-                        white-space: pre-wrap;
-                    }}
                     .loading {{ 
                         color: #666;
                         font-style: italic;
+                        text-align: center;
+                        padding: 40px;
                     }}
-                    .error {{
-                        color: #d32f2f;
+                    .error {{ color: #d32f2f; }}
+                    
+                    /* Hero Sections */
+                    .hero-section {{
+                        background: white;
+                        border-radius: 12px;
+                        padding: 24px;
+                        margin: 20px 0;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }}
+                    
+                    /* Token Stats */
+                    .token-stats {{
+                        display: grid;
+                        grid-template-columns: repeat(3, 1fr);
+                        gap: 20px;
+                        text-align: center;
+                    }}
+                    .market-cap {{
+                        grid-column: 1 / -1;
+                        font-size: 2em;
+                        padding: 20px;
+                        background: #f8f9fa;
+                        border-radius: 8px;
+                        margin-bottom: 20px;
+                    }}
+                    .stat-card {{
+                        padding: 15px;
+                        background: #f8f9fa;
+                        border-radius: 8px;
+                    }}
+                    .stat-label {{
+                        color: #666;
+                        font-size: 0.9em;
+                        margin-bottom: 5px;
+                    }}
+                    .stat-value {{
+                        font-size: 1.2em;
+                        font-weight: bold;
+                    }}
+                    
+                    /* Holder Thresholds */
+                    .toggle-container {{
+                        text-align: center;
+                        margin: 20px 0;
+                    }}
+                    .toggle-btn {{
+                        background: #fff;
+                        border: 1px solid #ddd;
+                        padding: 8px 16px;
+                        border-radius: 20px;
+                        cursor: pointer;
+                        margin: 0 5px;
+                    }}
+                    .toggle-btn.active {{
+                        background: #007bff;
+                        color: white;
+                        border-color: #007bff;
+                    }}
+                    .threshold-bar {{
+                        margin: 15px 0;
+                        display: flex;
+                        align-items: center;
+                    }}
+                    .threshold-label {{
+                        width: 80px;
+                        font-weight: bold;
+                    }}
+                    .bar-container {{
+                        flex-grow: 1;
+                        height: 24px;
+                        background: #eee;
+                        border-radius: 12px;
+                        margin: 0 15px;
+                        overflow: hidden;
+                    }}
+                    .bar {{
+                        height: 100%;
+                        background: #007bff;
+                        transition: width 0.3s ease;
+                    }}
+                    .threshold-value {{
+                        width: 200px;
+                        text-align: right;
+                    }}
+                    
+                    /* Layout */
+                    .metrics-layout {{
+                        display: flex;
+                        gap: 20px;
+                        margin: 20px 0;
+                    }}
+                    .metrics-layout > div {{
+                        flex: 1;
+                    }}
+                    @media (max-width: 768px) {{
+                        .metrics-layout {{
+                            flex-direction: column;
+                        }}
+                    }}
+                    
+                    /* Metrics Grid */
+                    .metrics-grid {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                        gap: 20px;
+                    }}
+                    .metric-card {{
+                        background: white;
+                        padding: 15px;
+                        border-radius: 8px;
+                        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                    }}
+                    .metric-label {{
+                        color: #666;
+                        font-size: 0.9em;
+                        margin-bottom: 5px;
+                    }}
+                    .metric-value {{
+                        font-size: 1.1em;
+                        font-weight: bold;
                     }}
                 </style>
             </head>
             <body>
-                <a href="/" class="back-link">← Back to Token List</a>
+                <a href="/" class="back-link">&larr; Back to Token List</a>
                 <h1>Token Details</h1>
                 <div class="token-address">{}</div>
-                <div id="result" class="loading">Loading token details...</div>
+                <div id="content" class="loading">Loading token details...</div>
+                
                 <script>
+                    function formatNumber(num, decimals = 2) {{
+                        const absNum = Math.abs(num);
+                        if (absNum >= 1e9) {{
+                            return (num / 1e9).toFixed(decimals) + 'B';
+                        }} else if (absNum >= 1e6) {{
+                            return (num / 1e6).toFixed(decimals) + 'M';
+                        }} else if (absNum >= 1e3) {{
+                            return (num / 1e3).toFixed(decimals) + 'K';
+                        }}
+                        return absNum < 1 ? num.toFixed(6) : num.toFixed(decimals);
+                    }}
+
+                    function updateHolderThresholds(data, useTotal = true) {{
+                        const thresholds = data.holder_thresholds;
+                        const container = document.getElementById('holder-thresholds');
+                        container.innerHTML = '';
+                        
+                        thresholds.forEach(t => {{
+                            const percentage = useTotal ? t.pct_total_holders : t.pct_of_10usd;
+                            const barWidth = useTotal ? (t.holder_count / data.holder_thresholds[0].total_holders) * 100 : percentage;
+                            
+                            const bar = document.createElement('div');
+                            bar.className = 'threshold-bar';
+                            bar.innerHTML = `
+                                <div class="threshold-label">>${{formatNumber(t.usd_threshold, 0)}}</div>
+                                <div class="bar-container">
+                                    <div class="bar" style="width: ${{barWidth}}%"></div>
+                                </div>
+                                                                    <div class="threshold-value">
+                                     ${{formatNumber(t.holder_count, 0)}} 
+                                     (${{percentage.toFixed(1)}}% of ${{useTotal ? 'total' : '>$10'}})
+                                </div>
+                            `;
+                            container.appendChild(bar);
+                        }});
+                    }}
+
+                                        function updateConcentrationBars(data) {{
+                        const bars = document.querySelectorAll('#concentration-bars .threshold-bar');
+                        if (!bars.length) return;
+
+                        // Update existing bars with concentration metrics
+                        data.concentration_metrics.forEach((m, i) => {{
+                            if (bars[i]) {{
+                                const bar = bars[i].querySelector('.bar');
+                                const value = bars[i].querySelector('.threshold-value');
+                                if (bar) bar.style.width = m.percentage + '%';
+                                if (value) value.textContent = m.percentage.toFixed(2) + '%';
+                            }}
+                        }});
+
+                        // Update the remaining holders bar (last bar)
+                        const lastBar = bars[bars.length - 1];
+                        if (lastBar && data.concentration_metrics.length > 0) {{
+                            const lastMetric = data.concentration_metrics[data.concentration_metrics.length - 1];
+                            const remainingPercentage = 100 - lastMetric.percentage;
+                            const bar = lastBar.querySelector('.bar');
+                            const value = lastBar.querySelector('.threshold-value');
+                            if (bar) bar.style.width = remainingPercentage + '%';
+                            if (value) value.textContent = remainingPercentage.toFixed(2) + '%';
+                        }}
+                    }}
+
                     async function loadTokenDetails() {{
-                        const resultDiv = document.getElementById('result');
+                        const contentDiv = document.getElementById('content');
                         try {{
                             const res = await fetch('http://localhost:8000/tokens/' + encodeURIComponent('{}'));
                             if (!res.ok) throw new Error(`HTTP error! status: ${{res.status}}`);
                             const data = await res.text();
                             try {{
                                 const jsonData = JSON.parse(data);
-                                resultDiv.className = '';
-                                resultDiv.textContent = JSON.stringify(jsonData, null, 2);
-                            }} catch {{
-                                resultDiv.className = 'error';
-                                resultDiv.textContent = data;
+                                contentDiv.className = '';
+                                contentDiv.innerHTML = `
+                                    <!-- Token Stats Hero -->
+                                    <div class="hero-section">
+                                        <div class="token-stats">
+                                            <div class="market-cap">
+                                                <div class="stat-label">Market Cap</div>
+                                                <div class="stat-value">$${{formatNumber(jsonData.token_stats.price * (jsonData.token_stats.supply / Math.pow(10, jsonData.token_stats.decimals)))}}</div>
+                                            </div>
+                                            <div class="stat-card">
+                                                <div class="stat-label">Price</div>
+                                                <div class="stat-value">$${{jsonData.token_stats.price}}</div>
+                                            </div>
+                                            <div class="stat-card">
+                                                <div class="stat-label">Supply</div>
+                                                <div class="stat-value">${{formatNumber(jsonData.token_stats.supply / Math.pow(10, jsonData.token_stats.decimals))}}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="metrics-layout">
+                                        <!-- Holder Thresholds Hero -->
+                                        <div class="hero-section">
+                                            <h2>Holder Thresholds</h2>
+                                            <div class="toggle-container">
+                                                <button class="toggle-btn active" onclick="this.classList.add('active'); this.nextElementSibling.classList.remove('active'); updateHolderThresholds(window.tokenData, true)">All Wallets</button>
+                                                <button class="toggle-btn" onclick="this.classList.add('active'); this.previousElementSibling.classList.remove('active'); updateHolderThresholds(window.tokenData, false)">>$10 Wallets</button>
+                                            </div>
+                                            <div id="holder-thresholds"></div>
+                                        </div>
+
+                                        <!-- Concentration Metrics Hero -->
+                                        <div class="hero-section">
+                                            <h2>Concentration Metrics</h2>
+                                            <div id="concentration-bars">
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">#1 Top Holder</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">Top 10 Holders</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">Top 25 Holders</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">Top 50 Holders</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">Top 100 Holders</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">Top 250 Holders</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                                <div class="threshold-bar">
+                                                    <div class="threshold-label">251+ Holders &infin;</div>
+                                                    <div class="bar-container"><div class="bar"></div></div>
+                                                    <div class="threshold-value">0%</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Distribution Stats Hero -->
+                                    <div class="hero-section">
+                                        <h2>Distribution Stats</h2>
+                                        <div class="metrics-grid">
+                                            <div class="metric-card">
+                                                <div class="metric-label">Distribution Score</div>
+                                                <div class="metric-value">${{jsonData.distribution_stats.distribution_score.toFixed(2)}}</div>
+                                            </div>
+                                            <div class="metric-card">
+                                                <div class="metric-label">HHI</div>
+                                                <div class="metric-value">${{jsonData.distribution_stats.hhi.toFixed(2)}}</div>
+                                            </div>
+                                            <div class="metric-card">
+                                                <div class="metric-label">Mean Balance</div>
+                                                <div class="metric-value">${{formatNumber(jsonData.distribution_stats.mean_balance)}}</div>
+                                            </div>
+                                            <div class="metric-card">
+                                                <div class="metric-label">Median Balance</div>
+                                                <div class="metric-value">${{formatNumber(jsonData.distribution_stats.median_balance)}}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                                
+                                                                                // Store data globally for the toggle functionality
+                                                window.tokenData = jsonData;
+                                                updateHolderThresholds(jsonData, true);
+                                                updateConcentrationBars(jsonData);
+                                
+                            }} catch (parseError) {{
+                                contentDiv.className = 'error';
+                                contentDiv.textContent = data;
                             }}
                         }} catch (error) {{
-                            resultDiv.className = 'error';
-                            resultDiv.textContent = 'Error loading token details: ' + error.message;
+                            contentDiv.className = 'error';
+                            contentDiv.textContent = 'Error loading token details: ' + error.message;
                         }}
                     }}
                     loadTokenDetails();
@@ -292,7 +576,7 @@ async fn index() -> impl IntoResponse {
                             const res = await fetch('http://localhost:8000/tokens', {
                                 method: 'POST',
                                 headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({contract})
+                                body: JSON.stringify({mint_address: contract})
                             });
                             if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                             
