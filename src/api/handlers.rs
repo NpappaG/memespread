@@ -1,8 +1,8 @@
 use axum::{
-    extract::{State, Query},
+    extract::{State, Path},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use governor::{RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
@@ -19,19 +19,25 @@ pub type AppState = (
 );
 
 #[derive(Deserialize)]
-pub struct TokenParams {
+pub struct CreateTokenRequest {
     pub mint_address: String,
 }
 
-pub async fn get_token_stats(
+#[derive(Serialize)]
+pub struct CreateTokenResponse {
+    status: String,
+    message: String,
+}
+
+pub async fn create_token_monitor(
     State((_rpc_client, rate_limiter, db)): State<AppState>,
-    Query(params): Query<TokenParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    Json(params): Json<CreateTokenRequest>,
+) -> Result<Json<CreateTokenResponse>, ApiError> {
     rate_limiter.until_ready().await;
     
-    tracing::info!("Received request for token: {}", params.mint_address);
+    tracing::info!("Received request to monitor token: {}", params.mint_address);
     
-    // Check if token is monitored
+    // Check if token is already monitored
     let is_monitored = db.query(
         "SELECT mint_address FROM monitored_tokens WHERE mint_address = ? LIMIT 1"
     )
@@ -43,35 +49,61 @@ pub async fn get_token_stats(
             ApiError::DatabaseError(e.to_string())
         })?;
 
-    if is_monitored.is_none() {
-        tracing::info!("Token {} not monitored, adding to monitoring", params.mint_address);
-        db.query(
-            "INSERT INTO monitored_tokens (mint_address, last_stats_update, last_metrics_update) 
-             SELECT ?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00')
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM monitored_tokens WHERE mint_address = ?
-             )"
-        )
-            .bind(&params.mint_address)
-            .bind(&params.mint_address)
-            .execute()
-            .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
-
-        // Check for excluded accounts for this new token
-        if let Err(e) = check_new_token_exclusions(&_rpc_client, &rate_limiter, &db, &params.mint_address).await {
-            tracing::error!("Failed to check excluded accounts for new token: {}", e);
-        }
-
-        return Ok(Json(serde_json::json!({
-            "status": "monitoring_started",
-            "message": "Token has been added to monitoring. Data will be available soon."
-        })));
+    if is_monitored.is_some() {
+        return Ok(Json(CreateTokenResponse {
+            status: "already_monitored".to_string(),
+            message: "Token is already being monitored".to_string(),
+        }));
     }
 
-    match get_token_metrics(&db, &params.mint_address).await {
+    // Add token to monitoring
+    db.query(
+        "INSERT INTO monitored_tokens (mint_address, last_stats_update, last_metrics_update) 
+         VALUES (?, toDateTime('1970-01-01 00:00:00'), toDateTime('1970-01-01 00:00:00'))"
+    )
+        .bind(&params.mint_address)
+        .execute()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    // Check for excluded accounts for this new token
+    if let Err(e) = check_new_token_exclusions(&_rpc_client, &rate_limiter, &db, &params.mint_address).await {
+        tracing::error!("Failed to check excluded accounts for new token: {}", e);
+    }
+
+    Ok(Json(CreateTokenResponse {
+        status: "monitoring_started".to_string(),
+        message: "Token has been added to monitoring. Data will be available soon.".to_string(),
+    }))
+}
+
+pub async fn get_token_stats(
+    State((_rpc_client, rate_limiter, db)): State<AppState>,
+    Path(mint_address): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    rate_limiter.until_ready().await;
+    
+    tracing::info!("Retrieving stats for token: {}", mint_address);
+    
+    // Check if token is monitored
+    let is_monitored = db.query(
+        "SELECT mint_address FROM monitored_tokens WHERE mint_address = ? LIMIT 1"
+    )
+        .bind(&mint_address)
+        .fetch_optional::<String>()
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error checking monitored status: {}", e);
+            ApiError::DatabaseError(e.to_string())
+        })?;
+
+    if is_monitored.is_none() {
+        return Err(ApiError::TokenNotMonitored(mint_address));
+    }
+
+    match get_token_metrics(&db, &mint_address).await {
         Ok(stats) => {
-            tracing::info!("Successfully retrieved stats for {}", params.mint_address);
+            tracing::info!("Successfully retrieved stats for {}", mint_address);
             Ok(Json(structure_token_stats(stats)))
         },
         Err(e) => {

@@ -1,12 +1,13 @@
 use axum::{
-    routing::get,
+    routing::{get, post},
     Router,
 };
-use super::handlers::get_token_stats;
+use super::handlers::{get_token_stats, create_token_monitor};
 use super::state::AppState;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
-        .route("/token-stats", get(get_token_stats))
+        .route("/tokens/:mint_address", get(get_token_stats))
+        .route("/tokens", post(create_token_monitor))
         .with_state(state)
 }

@@ -14,6 +14,7 @@ use tokio::time::{sleep, Duration};
 use poem::{handler, Route, Server, get, post, web::{Json, Data}, Response, IntoResponse};
 use poem::EndpointExt;
 use serde::Deserialize;
+use serde::Serialize;
 use reqwest::Client as ReqwestClient;
 
 mod types;
@@ -48,23 +49,35 @@ async fn connect_to_clickhouse(max_retries: u32) -> Result<Client> {
     unreachable!()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ContractInput {
     contract: String,
 }
 
 #[handler]
 async fn submit(Json(input): Json<ContractInput>, client: Data<&ReqwestClient>) -> impl IntoResponse {
-    // Forward the contract address to the backend API
-    let url = format!("http://localhost:8000/token-stats?mint_address={}", input.contract);
-    match client.get(&url).send().await {
+    // First create/monitor the token
+    let create_url = format!("http://localhost:8000/tokens");
+    let create_response = client.post(&create_url)
+        .json(&input)
+        .send()
+        .await;
+
+    match create_response {
         Ok(resp) => {
-            match resp.text().await {
-                Ok(body) => body,
-                Err(_) => "Failed to read backend response".to_string(),
+            // Now get the stats
+            let get_url = format!("http://localhost:8000/tokens/{}", input.contract);
+            match client.get(&get_url).send().await {
+                Ok(stats_resp) => {
+                    match stats_resp.text().await {
+                        Ok(body) => body,
+                        Err(_) => "Failed to read stats response".to_string(),
+                    }
+                }
+                Err(_) => "Failed to get token stats".to_string(),
             }
         }
-        Err(_) => "Failed to contact backend".to_string(),
+        Err(_) => "Failed to initiate token monitoring".to_string(),
     }
 }
 
@@ -75,23 +88,69 @@ async fn index() -> impl IntoResponse {
         .body(
             r#"<!DOCTYPE html>
             <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+                    h1 { color: #333; }
+                    form { margin: 20px 0; }
+                    input[type="text"] { 
+                        padding: 8px; 
+                        width: 300px; 
+                        margin-right: 10px;
+                        border: 1px solid #ddd;
+                        border-radius: 4px;
+                    }
+                    button { 
+                        padding: 8px 16px; 
+                        background: #4CAF50; 
+                        color: white; 
+                        border: none;
+                        border-radius: 4px;
+                        cursor: pointer;
+                    }
+                    button:hover { background: #45a049; }
+                    #result { 
+                        margin-top: 20px;
+                        padding: 15px;
+                        border: 1px solid #ddd;
+                        border-radius: 4px;
+                        min-height: 100px;
+                        white-space: pre-wrap;
+                    }
+                </style>
+            </head>
             <body>
-                <h1>Contract Stats</h1>
+                <h1>Token Stats Monitor</h1>
                 <form id="contract-form">
-                    <input type="text" id="contract" placeholder="Enter contract address">
-                    <button type="submit">Submit</button>
+                    <input type="text" id="contract" placeholder="Enter token mint address">
+                    <button type="submit">Monitor Token</button>
                 </form>
                 <div id="result"></div>
                 <script>
                     document.getElementById('contract-form').addEventListener('submit', async (e) => {
                         e.preventDefault();
                         const contract = document.getElementById('contract').value;
-                        const res = await fetch('/submit', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({contract})
-                        });
-                        document.getElementById('result').innerText = await res.text();
+                        const resultDiv = document.getElementById('result');
+                        resultDiv.textContent = 'Processing...';
+                        
+                        try {
+                            const res = await fetch('/submit', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({contract})
+                            });
+                            const data = await res.text();
+                            try {
+                                // Try to parse and pretty print JSON
+                                const jsonData = JSON.parse(data);
+                                resultDiv.textContent = JSON.stringify(jsonData, null, 2);
+                            } catch {
+                                // If not JSON, display as is
+                                resultDiv.textContent = data;
+                            }
+                        } catch (error) {
+                            resultDiv.textContent = 'Error: ' + error.message;
+                        }
                     });
                 </script>
             </body>
