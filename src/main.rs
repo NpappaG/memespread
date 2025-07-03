@@ -621,19 +621,39 @@ async fn index() -> impl IntoResponse {
                             const data = await res.text();
                             try {
                                 const jsonData = JSON.parse(data);
-                                resultDiv.className = '';
-                                resultDiv.textContent = JSON.stringify(jsonData, null, 2);
+                                resultDiv.className = 'success';
+                                if (jsonData.status === 'monitoring_started') {
+                                    resultDiv.innerHTML = `
+                                        <div style="padding: 15px; background: #e8f5e9; border-radius: 4px; border: 1px solid #c8e6c9; color: #2e7d32;">
+                                            <strong>✓ Success:</strong> ${jsonData.message}
+                                        </div>
+                                    `;
+                                } else {
+                                    resultDiv.innerHTML = `
+                                        <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px; overflow-x: auto;">
+                                            ${JSON.stringify(jsonData, null, 2)}
+                                        </pre>
+                                    `;
+                                }
                                 // Clear input on success
                                 document.getElementById('contract').value = '';
                                 // Refresh token list
                                 loadTokenList();
                             } catch {
                                 resultDiv.className = 'error';
-                                resultDiv.textContent = data;
+                                resultDiv.innerHTML = `
+                                    <div style="padding: 15px; background: #ffebee; border-radius: 4px; border: 1px solid #ffcdd2;">
+                                        <strong>Error:</strong> ${data}
+                                    </div>
+                                `;
                             }
                         } catch (error) {
                             resultDiv.className = 'error';
-                            resultDiv.textContent = 'Error: ' + error.message;
+                            resultDiv.innerHTML = `
+                                <div style="padding: 15px; background: #ffebee; border-radius: 4px; border: 1px solid #ffcdd2;">
+                                    <strong>Error:</strong> ${error.message}
+                                </div>
+                            `;
                         }
                     });
 
