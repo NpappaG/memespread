@@ -11,11 +11,8 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use clickhouse::Client;
 use crate::db::init::init_database;
 use tokio::time::{sleep, Duration};
-use poem::{handler, Route, Server, get, post, web::{Json, Data}, Response, IntoResponse};
-use poem::EndpointExt;
-use serde::Deserialize;
-use serde::Serialize;
-use reqwest::Client as ReqwestClient;
+use poem::{handler, Route, Server, get, post, web::{Json, Path}, Response, IntoResponse, middleware::Cors, EndpointExt};
+use serde::{Deserialize, Serialize};
 
 mod types;
 mod services;
@@ -55,30 +52,79 @@ struct ContractInput {
 }
 
 #[handler]
-async fn submit(Json(input): Json<ContractInput>, client: Data<&ReqwestClient>) -> impl IntoResponse {
-    // First create/monitor the token
-    let create_url = format!("http://localhost:8000/tokens");
-    let create_response = client.post(&create_url)
-        .json(&input)
-        .send()
-        .await;
+async fn submit(Json(input): Json<ContractInput>) -> impl IntoResponse {
+    Response::builder()
+        .content_type("application/json")
+        .body(format!("{{\"status\": \"success\", \"message\": \"Token {} submitted for monitoring\"}}", input.contract))
+}
 
-    match create_response {
-        Ok(resp) => {
-            // Now get the stats
-            let get_url = format!("http://localhost:8000/tokens/{}", input.contract);
-            match client.get(&get_url).send().await {
-                Ok(stats_resp) => {
-                    match stats_resp.text().await {
-                        Ok(body) => body,
-                        Err(_) => "Failed to read stats response".to_string(),
-                    }
-                }
-                Err(_) => "Failed to get token stats".to_string(),
-            }
-        }
-        Err(_) => "Failed to initiate token monitoring".to_string(),
-    }
+#[handler]
+async fn token_details(Path(mint_address): Path<String>) -> impl IntoResponse {
+    Response::builder()
+        .content_type("text/html")
+        .body(
+            format!(r#"<!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }}
+                    h1 {{ color: #333; }}
+                    .back-link {{ 
+                        display: inline-block;
+                        margin-bottom: 20px;
+                        color: #666;
+                        text-decoration: none;
+                    }}
+                    .back-link:hover {{ color: #333; }}
+                    #result {{ 
+                        margin-top: 20px;
+                        padding: 15px;
+                        border: 1px solid #ddd;
+                        border-radius: 4px;
+                        min-height: 100px;
+                        white-space: pre-wrap;
+                    }}
+                    .loading {{ 
+                        color: #666;
+                        font-style: italic;
+                    }}
+                    .error {{
+                        color: #d32f2f;
+                    }}
+                </style>
+            </head>
+            <body>
+                <a href="/" class="back-link">← Back to Token List</a>
+                <h1>Token Details</h1>
+                <div class="token-address">{}</div>
+                <div id="result" class="loading">Loading token details...</div>
+                <script>
+                    async function loadTokenDetails() {{
+                        const resultDiv = document.getElementById('result');
+                        try {{
+                            const res = await fetch('http://localhost:8000/tokens/' + encodeURIComponent('{}'));
+                            if (!res.ok) throw new Error(`HTTP error! status: ${{res.status}}`);
+                            const data = await res.text();
+                            try {{
+                                const jsonData = JSON.parse(data);
+                                resultDiv.className = '';
+                                resultDiv.textContent = JSON.stringify(jsonData, null, 2);
+                            }} catch {{
+                                resultDiv.className = 'error';
+                                resultDiv.textContent = data;
+                            }}
+                        }} catch (error) {{
+                            resultDiv.className = 'error';
+                            resultDiv.textContent = 'Error loading token details: ' + error.message;
+                        }}
+                    }}
+                    loadTokenDetails();
+                </script>
+            </body>
+            </html>"#,
+            mint_address, mint_address
+        )
+    )
 }
 
 #[handler]
@@ -91,8 +137,55 @@ async fn index() -> impl IntoResponse {
             <head>
                 <style>
                     body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
-                    h1 { color: #333; }
-                    form { margin: 20px 0; }
+                    h1, h2 { color: #333; }
+                    .token-list {
+                        margin-top: 30px;
+                    }
+                    .token-item {
+                        padding: 15px;
+                        border: 1px solid #ddd;
+                        border-radius: 4px;
+                        margin: 10px 0;
+                        cursor: pointer;
+                        transition: all 0.2s;
+                        text-decoration: none;
+                        color: inherit;
+                        display: block;
+                    }
+                    .token-item:hover {
+                        background-color: #f5f5f5;
+                        transform: translateX(5px);
+                    }
+                    .token-address {
+                        color: #2196F3;
+                        font-weight: bold;
+                        font-family: monospace;
+                    }
+                    .token-time {
+                        color: #666;
+                        font-size: 0.9em;
+                        margin-top: 5px;
+                    }
+                    .loading {
+                        color: #666;
+                        font-style: italic;
+                    }
+                    .error {
+                        color: #d32f2f;
+                        padding: 10px;
+                        border: 1px solid #ffcdd2;
+                        border-radius: 4px;
+                        background: #ffebee;
+                    }
+                    #add-token {
+                        margin-top: 30px;
+                        padding: 20px;
+                        background: #f5f5f5;
+                        border-radius: 4px;
+                    }
+                    #add-token h2 {
+                        margin-top: 0;
+                    }
                     input[type="text"] { 
                         padding: 8px; 
                         width: 300px; 
@@ -109,49 +202,121 @@ async fn index() -> impl IntoResponse {
                         cursor: pointer;
                     }
                     button:hover { background: #45a049; }
-                    #result { 
-                        margin-top: 20px;
-                        padding: 15px;
-                        border: 1px solid #ddd;
-                        border-radius: 4px;
-                        min-height: 100px;
-                        white-space: pre-wrap;
-                    }
                 </style>
             </head>
             <body>
                 <h1>Token Stats Monitor</h1>
-                <form id="contract-form">
-                    <input type="text" id="contract" placeholder="Enter token mint address">
-                    <button type="submit">Monitor Token</button>
-                </form>
-                <div id="result"></div>
+                <div id="token-list" class="token-list loading">Loading monitored tokens...</div>
+
+                <div id="add-token">
+                    <h2>Monitor New Token</h2>
+                    <form id="contract-form">
+                        <input type="text" id="contract" placeholder="Enter token mint address">
+                        <button type="submit">Monitor Token</button>
+                    </form>
+                    <div id="result"></div>
+                </div>
+
                 <script>
+                    // Format date string to relative time
+                    function timeAgo(dateStr) {
+                        const date = new Date(dateStr);
+                        const now = new Date();
+                        const seconds = Math.floor((now - date) / 1000);
+                        
+                        let interval = Math.floor(seconds / 31536000);
+                        if (interval > 1) return interval + ' years ago';
+                        if (interval === 1) return 'a year ago';
+                        
+                        interval = Math.floor(seconds / 2592000);
+                        if (interval > 1) return interval + ' months ago';
+                        if (interval === 1) return 'a month ago';
+                        
+                        interval = Math.floor(seconds / 86400);
+                        if (interval > 1) return interval + ' days ago';
+                        if (interval === 1) return 'yesterday';
+                        
+                        interval = Math.floor(seconds / 3600);
+                        if (interval > 1) return interval + ' hours ago';
+                        if (interval === 1) return 'an hour ago';
+                        
+                        interval = Math.floor(seconds / 60);
+                        if (interval > 1) return interval + ' minutes ago';
+                        if (interval === 1) return 'a minute ago';
+                        
+                        if (seconds < 10) return 'just now';
+                        
+                        return Math.floor(seconds) + ' seconds ago';
+                    }
+
+                    // Load and display token list
+                    async function loadTokenList() {
+                        const listDiv = document.getElementById('token-list');
+                        try {
+                            const res = await fetch('http://localhost:8000/tokens');
+                            if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                            const tokens = await res.json();
+                            
+                            if (tokens.length === 0) {
+                                listDiv.className = 'token-list';
+                                listDiv.innerHTML = '<div class="token-item" style="cursor: default; background: #f9f9f9;">No tokens monitored yet. Add your first token below!</div>';
+                                return;
+                            }
+
+                            const tokenListHtml = tokens.map(token => `
+                                <a href="/token/${token.mint_address}" class="token-item">
+                                    <div class="token-address">${token.mint_address}</div>
+                                    <div class="token-time">
+                                        Last updated: ${timeAgo(token.last_stats_update)}
+                                    </div>
+                                </a>
+                            `).join('');
+                            
+                            listDiv.className = 'token-list';
+                            listDiv.innerHTML = tokenListHtml;
+                        } catch (error) {
+                            listDiv.className = 'token-list error';
+                            listDiv.textContent = 'Error loading token list: ' + error.message;
+                        }
+                    }
+
+                    // Handle new token submission
                     document.getElementById('contract-form').addEventListener('submit', async (e) => {
                         e.preventDefault();
                         const contract = document.getElementById('contract').value;
                         const resultDiv = document.getElementById('result');
+                        resultDiv.className = 'loading';
                         resultDiv.textContent = 'Processing...';
                         
                         try {
-                            const res = await fetch('/submit', {
+                            const res = await fetch('http://localhost:8000/tokens', {
                                 method: 'POST',
                                 headers: {'Content-Type': 'application/json'},
                                 body: JSON.stringify({contract})
                             });
+                            if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                            
                             const data = await res.text();
                             try {
-                                // Try to parse and pretty print JSON
                                 const jsonData = JSON.parse(data);
+                                resultDiv.className = '';
                                 resultDiv.textContent = JSON.stringify(jsonData, null, 2);
+                                // Clear input on success
+                                document.getElementById('contract').value = '';
+                                // Refresh token list
+                                loadTokenList();
                             } catch {
-                                // If not JSON, display as is
+                                resultDiv.className = 'error';
                                 resultDiv.textContent = data;
                             }
                         } catch (error) {
+                            resultDiv.className = 'error';
                             resultDiv.textContent = 'Error: ' + error.message;
                         }
                     });
+
+                    // Initial load of token list
+                    loadTokenList();
                 </script>
             </body>
             </html>"#
@@ -191,7 +356,7 @@ async fn main() -> Result<(), anyhow::Error> {
     init_database(&client).await?;
 
     let state = (rpc_client.clone(), rpc_limiter.clone(), client.clone());
-    let app = create_router(state);
+    let app = create_router(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
     tracing::info!("Listening on {}", addr);
@@ -224,11 +389,15 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    // Frontend server
-    let client = ReqwestClient::new();
+    // Frontend routes
     let frontend_routes = Route::new()
         .at("/", get(index))
-        .at("/submit", post(submit.data(client)));
+        .at("/token/:mint_address", get(token_details))
+        .at("/tokens", post(submit))
+        .with(Cors::new()
+            .allow_origin_regex(".*")  // Allow all origins in development
+            .allow_methods(vec!["GET", "POST"])
+            .allow_headers(vec!["Content-Type"]));
     let frontend_server = Server::new(poem::listener::TcpListener::bind("0.0.0.0:3000")).run(frontend_routes);
 
     let frontend_handle = tokio::spawn(frontend_server);

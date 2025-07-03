@@ -29,6 +29,13 @@ pub struct CreateTokenResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+pub struct TokenListItem {
+    mint_address: String,
+    last_stats_update: String,
+    last_metrics_update: String,
+}
+
 pub async fn create_token_monitor(
     State((_rpc_client, rate_limiter, db)): State<AppState>,
     Json(params): Json<CreateTokenRequest>,
@@ -111,4 +118,37 @@ pub async fn get_token_stats(
             Err(ApiError::DatabaseError(e.to_string()))
         }
     }
+}
+
+pub async fn get_all_tokens(
+    State((_rpc_client, rate_limiter, db)): State<AppState>,
+) -> Result<Json<Vec<TokenListItem>>, ApiError> {
+    rate_limiter.until_ready().await;
+    
+    tracing::info!("Retrieving all monitored tokens");
+    
+    let tokens = db.query(
+        "SELECT 
+            mint_address,
+            toString(last_stats_update) as last_stats_update,
+            toString(last_metrics_update) as last_metrics_update
+         FROM monitored_tokens
+         ORDER BY last_stats_update DESC"
+    )
+        .fetch_all::<(String, String, String)>()
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error fetching monitored tokens: {}", e);
+            ApiError::DatabaseError(e.to_string())
+        })?;
+
+    let token_list = tokens.into_iter()
+        .map(|(mint_address, last_stats_update, last_metrics_update)| TokenListItem {
+            mint_address,
+            last_stats_update,
+            last_metrics_update,
+        })
+        .collect();
+
+    Ok(Json(token_list))
 }

@@ -12,7 +12,6 @@ solana-client = "1.17"
 solana-sdk = "1.17"
 solana-account-decoder = "1.17"
 spl-token = "4.0"
-reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rayon = "1.7"
@@ -31,3 +30,4 @@ clickhouse = { version = "0.11.2", features = ["time"] }
 chrono = "0.4"
 time = "0.3"
 poem = { version = "3.1.11", features = ["static-files"] }
+reqwest = { version = "0.11", features = ["json"] }
