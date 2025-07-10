@@ -7,7 +7,7 @@ Often, memecoin creators of send fractions of cents to thousands of random addre
 Memespread helps you DIY this process with little more than a Helius API key.
 ![Memespread Dashboard](docs/images/dashboard.png)
 
-Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
+Using ClickHouse's powerful [materialized views](https://clickhouse.com/docs/materialized-views) and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
 
 ## Setup
 
@@ -39,7 +39,7 @@ There are three ways to run Memespread:
 4. In a second terminal, run the application in debug mode:
 
    ```bash
-   cargo run debug=true
+   RUSTUP=DEBUG cargo run
    ```
 
    The application will automatically connect to the "default" ClickHouse database and initialize all necessary tables and materialized views on startup.
@@ -52,7 +52,7 @@ There are three ways to run Memespread:
    HELIUS_API_KEY=XXXXX-xxxx-XXXX
    ```
 
-2. Build and run with Docker:
+2. Build and run with Docker from root:
 
    ```bash
    # Build the images (only needed first time or when code changes)
@@ -100,35 +100,33 @@ Note: If you're using a remote Kubernetes cluster or multiple nodes, you'll need
 - Push your built image to a container registry, or
 - Build the image on each node that might run the container
 
-### Verifying Setup
-
-After startup with any option above, you can verify the database was created correctly by:
-
-1. Visit `http://localhost:8123/play` in your browser to access ClickHouse's web interface
-2. Run `SHOW TABLES;` to see all created tables
-3. Run `SELECT 1;` to verify the connection is working
-
 ## Usage
 
-**Browser Interface**: You can interact with the API directly in your browser by visiting the URL above. (Or GET the endpoint below with an app) You may want to build a frontend application to provide a more polished user experience for querying and visualizing token concentration data.
+**Frontend Interface**: The application provides a web interface at `http://localhost:3000` where you can:
 
-### Adding a Coin to the Clickhouse DB for Monitoring
+1. Monitor new tokens by entering their contract address
+2. View statistics for already monitored tokens
 
-To add a coin to the database, navigate to:
+### Adding a Token to Monitor
 
+![Frontend Interface](docs/images/frontend.png)
+
+1. Visit `http://localhost:3000` in your browser
+2. Enter a valid Solana SPL token contract address
+3. The system will automatically:
+   - Start monitoring the token (updates every minute)
+   - Begin collecting holder and distribution data
+   - Display initial stats once available (usually within 1-2 minutes)
+
+You can verify monitoring status by querying ClickHouse directly:
+
+```sql
+SELECT * FROM monitored_tokens;
 ```
-http://localhost:8000/token-stats?mint_address={solcontractaddress}
-```
 
-Replace `{solcontractaddress}` with the actual Solana contract address / mint address (only SPL tokens currently).
+### Viewing Token Statistics
 
-**First Visit**: If the coin is not already being monitored, that mint addrss will be added to the monitoring system.
-
-You can also query `SELECT * FROM monitored_tokens;` to see which tokens are being monitored - monitoring updates occur every minute by default.
-
-Wait 1-2 minutes to populate Clickhouse with enough observations.
-
-**Subsequent Visits**: After a coin has been monitored once or twice, going to `http://localhost:3000/token-stats?mint_address={solcontractaddress}` will now return:
+Once a token has been monitored for a few minutes, you'll see:
 
 - **Concentration Metrics**: Token supply percentages owned by the largest N wallets of the coin (1, 10, 25, 50, 100, 250 holders)
 - **Distribution Stats**: HHI score, distribution score, balance statistics
