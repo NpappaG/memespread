@@ -1,10 +1,19 @@
 # Memespread - track holders & concentration of Solana coins in real-time with Clickhouse DB
 
-**memespread** was born to examine with extreme precision just how much supply of a coin is concentrated and how this concentration changes over time. Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
+**Memespread** helps measure with extreme precision how the supply of Solana coins is concentrated.
+
+Often, memecoin creators of send fractions of cents to thousands of random addresses to pump up "holder" counts. Sites such as HolderScan have helped illuminate this practice, but they are slow to update data and add the latest coins. (It's a fairly data and RPC-heavy process.)
+
+Memespread helps you DIY this process with little more than a Helius API key.
+![Memespread Dashboard](docs/images/dashboard.png)
+
+Using ClickHouse's powerful [materialized views](https://clickhouse.com/docs/materialized-views) and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
 
 ## Setup
 
-### Option 1: Local Development
+There are three ways to run Memespread:
+
+### Option 1: Local Development (No Containers)
 
 1. Add `.env` file with your Helius API key:
 
@@ -17,7 +26,6 @@
    ```bash
    # On macOS
    brew install --cask clickhouse
-
    ```
 
    For more installation options, see the [ClickHouse installation docs](https://clickhouse.com/docs/install).
@@ -31,14 +39,12 @@
 4. In a second terminal, run the application in debug mode:
 
    ```bash
-   cargo run debug=true
+   RUSTUP=DEBUG cargo run
    ```
 
    The application will automatically connect to the "default" ClickHouse database and initialize all necessary tables and materialized views on startup.
 
-5. **Verify Setup**: After startup, you can verify the database was created correctly by visiting `http://localhost:8123/play` in your browser. This opens ClickHouse's web interface where you can run `SHOW TABLES;` to see all the created tables.
-
-### Option 2: Docker
+### Option 2: Docker Compose
 
 1. Add `.env` file with your Helius API key:
 
@@ -46,39 +52,81 @@
    HELIUS_API_KEY=XXXXX-xxxx-XXXX
    ```
 
-2. Run with Docker Compose:
+2. Build and run with Docker from root:
 
    ```bash
-   docker-compose up --build
+   # Build the images (only needed first time or when code changes)
+   bash deploy/docker/setup.sh build
+
+   # Start the services (with logs)
+   bash deploy/docker/setup.sh up
+
+   # Or start in background
+   bash deploy/docker/setup.sh up --detach
    ```
 
-3. **Verify Setup**: After startup, you can verify the database was created correctly by:
+   Other useful commands:
 
-   - Visit `http://localhost:8123/play` in your browser to access ClickHouse's web interface
-   - Run `SHOW TABLES;` to see all created tables
-   - Run `SELECT 1;` to verify the connection is working
+   ```bash
+   # View logs (if running detached)
+   bash deploy/docker/setup.sh logs
+
+   # Stop services
+   bash deploy/docker/setup.sh down
+   ```
+
+### Option 3: Kubernetes
+
+1. Add `.env` file with your Helius API key:
+
+   ```
+   HELIUS_API_KEY=XXXXX-xxxx-XXXX
+   ```
+
+2. Build the Docker image locally:
+
+   ```bash
+   docker build -t memespread:latest -f deploy/docker/Dockerfile .
+   ```
+
+3. Run the Kubernetes setup script:
+   ```bash
+   # This will create necessary secrets and configs
+   bash deploy/kubernetes/setup.sh up
+   ```
+
+Note: If you're using a remote Kubernetes cluster or multiple nodes, you'll need to either:
+
+- Push your built image to a container registry, or
+- Build the image on each node that might run the container
 
 ## Usage
 
-**Browser Interface**: You can interact with the API directly in your browser by visiting the URL above. (Or GET the endpoint below with an app) You may want to build a frontend application to provide a more polished user experience for querying and visualizing token concentration data.
+**Frontend Interface**: The application provides a web interface at `http://localhost:3000` where you can:
 
-### Adding a Coin to the Clickhouse DB for Monitoring
+1. Monitor new tokens by entering their contract address
+2. View statistics for already monitored tokens
 
-To add a coin to the database, navigate to:
+### Adding a Token to Monitor
 
+![Frontend Interface](docs/images/frontend.png)
+
+1. Visit `http://localhost:3000` in your browser
+2. Enter a valid Solana SPL token contract address
+3. The system will automatically:
+   - Start monitoring the token (updates every minute)
+   - Begin collecting holder and distribution data
+   - Display initial stats once available (usually within 1-2 minutes)
+
+You can verify monitoring status by querying ClickHouse directly:
+
+```sql
+SELECT * FROM monitored_tokens;
 ```
-http://localhost:8000/token-stats?mint_address={solcontractaddress}
-```
 
-Replace `{solcontractaddress}` with the actual Solana contract address / mint address (only SPL tokens currently).
+### Viewing Token Statistics
 
-**First Visit**: If the coin is not already being monitored, that mint addrss will be added to the monitoring system.
-
-You can also query `SELECT * FROM monitored_tokens;` to see which tokens are being monitored - monitoring updates occur every minute by default.
-
-Wait 1-2 minutes to populate Clickhouse with enough observations.
-
-**Subsequent Visits**: After a coin has been monitored once or twice, going to `http://localhost:3000/token-stats?mint_address={solcontractaddress}` will now return:
+Once a token has been monitored for a few minutes, you'll see:
 
 - **Concentration Metrics**: Token supply percentages owned by the largest N wallets of the coin (1, 10, 25, 50, 100, 250 holders)
 - **Distribution Stats**: HHI score, distribution score, balance statistics
@@ -152,34 +200,4 @@ clickhouse-client
 
 ```
 docker exec -it <container_name> clickhouse-client
-```
-
-#### Common commands
-
-Test if DB has ~14 default tables:
-
-```sql
--- List tables
-SHOW TABLES;
-```
-
-Remove a token from monitoring:
-
-```sql
--- Delete a token from monitoring
-DELETE FROM monitored_tokens WHERE mint_address = 'your_token_address';
-```
-
-Nuclear option to kill entire default db [Warning: deletes data - restart app/Docker container to re-make db]
-
-```sql
--- Clear all data for fresh start (restart app)
-DROP DATABASE DEFAULT;
-```
-
-Then:
-
-```sql
--- Clear all data for fresh start (restart app)
-CREATE DATABASE DEFAULT;
 ```
