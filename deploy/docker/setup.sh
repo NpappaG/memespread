@@ -97,12 +97,16 @@ case $COMMAND in
     
     "build")
         echo "Building Docker images..."
-        docker-compose -f "${SCRIPT_DIR}/docker-compose.yml" build
+        # Check and merge .env files
+        check_env_file
+        docker-compose -f "${SCRIPT_DIR}/docker-compose.yml" --env-file "$ENV_FILE" build
         ;;
 
     "down")
         echo "Tearing down Docker environment..."
-        docker-compose -f "${SCRIPT_DIR}/docker-compose.yml" down -v
+        # Check and merge .env files
+        check_env_file
+        docker-compose -f "${SCRIPT_DIR}/docker-compose.yml" --env-file "$ENV_FILE" down -v
         echo "Docker resources removed."
         ;;
 
