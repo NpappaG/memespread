@@ -1,10 +1,19 @@
 # Memespread - track holders & concentration of Solana coins in real-time with Clickhouse DB
 
-**memespread** was born to examine with extreme precision just how much supply of a coin is concentrated and how this concentration changes over time. Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
+**Memespread** helps measure with extreme precision how the supply of Solana coins is concentrated.
+
+Often, memecoin creators of send fractions of cents to thousands of random addresses to pump up "holder" counts. Sites such as HolderScan have helped illuminate this practice, but they are slow to update data and add the latest coins. (It's a fairly data and RPC-heavy process.)
+
+Memespread helps you DIY this process with little more than a Helius API key.
+![Memespread Dashboard](docs/images/dashboard.png)
+
+Using ClickHouse's powerful materialized views and real-time data processing, it provides granular insights into token distribution patterns, helping you understand the true concentration dynamics of any Solana token.
 
 ## Setup
 
-### Option 1: Local Development
+There are three ways to run Memespread:
+
+### Option 1: Local Development (No Containers)
 
 1. Add `.env` file with your Helius API key:
 
@@ -17,7 +26,6 @@
    ```bash
    # On macOS
    brew install --cask clickhouse
-
    ```
 
    For more installation options, see the [ClickHouse installation docs](https://clickhouse.com/docs/install).
@@ -36,9 +44,7 @@
 
    The application will automatically connect to the "default" ClickHouse database and initialize all necessary tables and materialized views on startup.
 
-5. **Verify Setup**: After startup, you can verify the database was created correctly by visiting `http://localhost:8123/play` in your browser. This opens ClickHouse's web interface where you can run `SHOW TABLES;` to see all the created tables.
-
-### Option 2: Docker
+### Option 2: Docker Compose
 
 1. Add `.env` file with your Helius API key:
 
@@ -46,17 +52,61 @@
    HELIUS_API_KEY=XXXXX-xxxx-XXXX
    ```
 
-2. Run with Docker Compose:
+2. Build and run with Docker:
 
    ```bash
-   docker-compose up --build
+   # Build the images (only needed first time or when code changes)
+   bash deploy/docker/setup.sh build
+
+   # Start the services (with logs)
+   bash deploy/docker/setup.sh up
+
+   # Or start in background
+   bash deploy/docker/setup.sh up --detach
    ```
 
-3. **Verify Setup**: After startup, you can verify the database was created correctly by:
+   Other useful commands:
 
-   - Visit `http://localhost:8123/play` in your browser to access ClickHouse's web interface
-   - Run `SHOW TABLES;` to see all created tables
-   - Run `SELECT 1;` to verify the connection is working
+   ```bash
+   # View logs (if running detached)
+   bash deploy/docker/setup.sh logs
+
+   # Stop services
+   bash deploy/docker/setup.sh down
+   ```
+
+### Option 3: Kubernetes
+
+1. Add `.env` file with your Helius API key:
+
+   ```
+   HELIUS_API_KEY=XXXXX-xxxx-XXXX
+   ```
+
+2. Build the Docker image locally:
+
+   ```bash
+   docker build -t memespread:latest -f deploy/docker/Dockerfile .
+   ```
+
+3. Run the Kubernetes setup script:
+   ```bash
+   # This will create necessary secrets and configs
+   bash deploy/kubernetes/setup.sh up
+   ```
+
+Note: If you're using a remote Kubernetes cluster or multiple nodes, you'll need to either:
+
+- Push your built image to a container registry, or
+- Build the image on each node that might run the container
+
+### Verifying Setup
+
+After startup with any option above, you can verify the database was created correctly by:
+
+1. Visit `http://localhost:8123/play` in your browser to access ClickHouse's web interface
+2. Run `SHOW TABLES;` to see all created tables
+3. Run `SELECT 1;` to verify the connection is working
 
 ## Usage
 
@@ -152,34 +202,4 @@ clickhouse-client
 
 ```
 docker exec -it <container_name> clickhouse-client
-```
-
-#### Common commands
-
-Test if DB has ~14 default tables:
-
-```sql
--- List tables
-SHOW TABLES;
-```
-
-Remove a token from monitoring:
-
-```sql
--- Delete a token from monitoring
-DELETE FROM monitored_tokens WHERE mint_address = 'your_token_address';
-```
-
-Nuclear option to kill entire default db [Warning: deletes data - restart app/Docker container to re-make db]
-
-```sql
--- Clear all data for fresh start (restart app)
-DROP DATABASE DEFAULT;
-```
-
-Then:
-
-```sql
--- Clear all data for fresh start (restart app)
-CREATE DATABASE DEFAULT;
 ```
