@@ -38,20 +38,29 @@ use crate::services::monitor;
 
 async fn connect_to_clickhouse(max_retries: u32) -> Result<Client> {
     let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    tracing::info!("Attempting to connect to ClickHouse with URL: {}", clickhouse_url);
+    
     let client = Client::default()
         .with_url(&clickhouse_url);
 
     for attempt in 1..=max_retries {
-        match client.query("SELECT 1").execute().await {
+        tracing::info!("Connection attempt {} of {}", attempt, max_retries);
+        match client.query("SELECT version()").execute().await {
             Ok(_) => {
-                tracing::info!("Connected to ClickHouse at {}", clickhouse_url);
+                tracing::info!("Successfully connected to ClickHouse");
+                // Try to get database name
+                match client.query("SELECT currentDatabase()").fetch_one::<String>().await {
+                    Ok(db_name) => tracing::info!("Connected to database: {}", db_name),
+                    Err(e) => tracing::warn!("Connected but couldn't get database name: {}", e),
+                }
                 return Ok(client);
             }
             Err(e) => {
+                tracing::error!("Connection attempt {} failed with error: {}", attempt, e);
                 if attempt == max_retries {
-                    return Err(anyhow::anyhow!("Failed to connect to ClickHouse after {} attempts: {}", max_retries, e));
+                    return Err(anyhow::anyhow!("Failed to connect to ClickHouse after {} attempts. Last error: {}", max_retries, e));
                 }
-                tracing::warn!("Failed to connect to ClickHouse (attempt {}/{}): {}", attempt, max_retries, e);
+                tracing::warn!("Retrying in 2 seconds...");
                 sleep(Duration::from_secs(2)).await;
             }
         }
