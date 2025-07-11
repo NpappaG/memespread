@@ -20,7 +20,18 @@ use crate::db::schema::{
 };
 
 pub async fn init_database(client: &Client) -> Result<()> {
-    tracing::info!("Initializing database tables...");
+    tracing::info!("Starting database initialization...");
+    
+    // First verify we can execute queries
+    match client.query("SELECT currentDatabase() as db").fetch_one::<String>().await {
+        Ok(db) => tracing::info!("Connected to database: {}", db),
+        Err(e) => {
+            tracing::error!("Failed to verify database connection: {}", e);
+            return Err(e.into());
+        }
+    }
+    
+    tracing::info!("Creating base tables...");
     
     // Base tables first
     for sql in [
@@ -29,13 +40,17 @@ pub async fn init_database(client: &Client) -> Result<()> {
         TOKEN_HOLDERS_SQL,
         EXCLUDED_ACCOUNTS_SQL,
     ] {
-        if let Err(e) = client.query(sql).execute().await {
-            tracing::error!("Failed to create base table: {}", e);
-            return Err(e.into());
+        match client.query(sql).execute().await {
+            Ok(_) => tracing::info!("Successfully created/verified table from SQL: {}", &sql[..100]),
+            Err(e) => {
+                tracing::error!("Failed to create base table. Error: {}", e);
+                tracing::error!("Failed SQL: {}", sql);
+                return Err(e.into());
+            }
         }
     }
 
-    tracing::info!("Initializing target tables for materialized views...");
+    tracing::info!("Creating target tables for materialized views...");
     
     // Create target tables before MVs
     for sql in [
@@ -45,13 +60,17 @@ pub async fn init_database(client: &Client) -> Result<()> {
         TOKEN_CONCENTRATION_TABLE_SQL,
         TOKEN_DISTRIBUTION_TABLE_SQL,
     ] {
-        if let Err(e) = client.query(sql).execute().await {
-            tracing::error!("Failed to create target table: {}", e);
-            return Err(e.into());
+        match client.query(sql).execute().await {
+            Ok(_) => tracing::info!("Successfully created/verified target table from SQL: {}", &sql[..100]),
+            Err(e) => {
+                tracing::error!("Failed to create target table. Error: {}", e);
+                tracing::error!("Failed SQL: {}", sql);
+                return Err(e.into());
+            }
         }
     }
 
-    tracing::info!("Initializing materialized views...");
+    tracing::info!("Creating materialized views...");
     
     // MVs in dependency order with verification
     let mv_configs = [
@@ -65,18 +84,20 @@ pub async fn init_database(client: &Client) -> Result<()> {
     for (name, sql) in mv_configs {
         match client.query(sql).execute().await {
             Ok(_) => {
-                tracing::info!("Created or verified MV {}", name);
+                tracing::info!("Successfully created/verified materialized view: {}", name);
             }
             Err(e) => {
                 if e.to_string().contains("already exists") {
-                    tracing::info!("MV {} already exists, skipping", name);
+                    tracing::info!("Materialized view {} already exists, skipping", name);
                     continue;
                 }
-                tracing::error!("Failed to create MV {}: {}", name, e);
+                tracing::error!("Failed to create materialized view {}. Error: {}", name, e);
+                tracing::error!("Failed SQL: {}", sql);
                 return Err(e.into());
             }
         }
     }
 
+    tracing::info!("Database initialization completed successfully!");
     Ok(())
 }
