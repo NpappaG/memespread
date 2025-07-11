@@ -39,8 +39,7 @@ use crate::services::monitor;
 async fn connect_to_clickhouse(max_retries: u32) -> Result<Client> {
     let clickhouse_url = env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
     let client = Client::default()
-        .with_url(&clickhouse_url)
-        .with_database("default");
+        .with_url(&clickhouse_url);
 
     for attempt in 1..=max_retries {
         match client.query("SELECT 1").execute().await {
